@@ -2,9 +2,9 @@
 name = "sablier-mcp"
 version = "0.1.0"
 description = "MCP server for Sablier — AI-powered regime-dependent factor modeling and portfolio analytics"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp-use>=0.5.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
 ]

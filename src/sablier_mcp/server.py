@@ -4,35 +4,21 @@ Sablier MCP Server
 Gives AI agents the ability to perform regime-dependent factor modeling,
 qualitative analysis, portfolio risk testing, and return simulation
 through the Sablier platform.
+
+Supports both local (stdio) and remote (streamable-http) transport.
 """
 
 import json
-from mcp.server.fastmcp import FastMCP
+import os
+from typing import Annotated
+
+from mcp.types import ToolAnnotations
+from pydantic import Field
+from mcp_use import MCPServer
 
 from sablier_mcp.client import SablierClient, SablierAPIError
 
-mcp = FastMCP(
-    "sablier",
-    instructions="""You have access to Sablier, an AI-powered portfolio analytics platform
-that provides regime-dependent factor modeling, qualitative analysis from SEC filings,
-and Monte Carlo return simulation.
-
-Typical workflow:
-1. Create a portfolio from tickers and weights (or list existing ones)
-2. Run qualitative analysis (GRAIN) to understand thematic exposures from filings
-3. Use existing trained models to simulate factor betas and returns
-4. Test portfolio risk under different market scenarios
-
-For new portfolios that need models trained:
-1. create_portfolio → get portfolio with assets
-2. list_feature_set_templates → pick a conditioning set of market factors
-3. create_models → batch create per-asset models
-4. train_models → start training (takes 5-30 min per asset)
-5. simulate_betas → compute regime-dependent factor exposures
-6. simulate_returns → sample return distributions under scenarios
-7. test_portfolio_risk → get VaR, CVaR, Sharpe, risk decomposition
-""",
-)
+server = MCPServer(name="Sablier", version="0.1.0")
 
 _client: SablierClient | None = None
 
@@ -54,25 +40,18 @@ def _fmt(data) -> str:
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="search_features",
+    description="Search for tickers (stocks, ETFs) and market features (VIX, DXY, rates). Use this to find available tickers before creating a portfolio, or to discover macro factors for conditioning sets.",
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+)
 async def search_features(
-    query: str,
-    is_asset: bool | None = None,
-    limit: int = 20,
+    query: Annotated[str, Field(description="Search term (e.g. 'AAPL', 'technology', 'volatility', 'gold')")],
+    is_asset: Annotated[bool | None, Field(description="If True, only assets. If False, only indicators.", default=None)] = None,
+    limit: Annotated[int, Field(description="Max results (default 20)", default=20)] = 20,
 ) -> str:
-    """Search for tickers (stocks, ETFs) and market features (VIX, DXY, rates).
-
-    Use this to find available tickers before creating a portfolio,
-    or to discover macro factors for conditioning sets.
-
-    Args:
-        query: Search term (e.g. "AAPL", "technology", "volatility", "gold")
-        is_asset: If True, only return assets (stocks/ETFs). If False, only indicators.
-        limit: Max results to return (default 20)
-    """
     client = get_client()
     results = await client.search_features(query, is_asset=is_asset, limit=limit)
-    # Summarize for readability
     summary = []
     for f in results:
         entry = {
@@ -93,15 +72,14 @@ async def search_features(
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
-async def list_portfolios(limit: int = 50) -> str:
-    """List the user's existing portfolios.
-
-    Returns portfolio names, IDs, asset compositions, and status.
-
-    Args:
-        limit: Max portfolios to return (default 50)
-    """
+@server.tool(
+    name="list_portfolios",
+    description="List the user's existing portfolios with names, IDs, asset compositions, and status.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def list_portfolios(
+    limit: Annotated[int, Field(description="Max portfolios to return", default=50)] = 50,
+) -> str:
     client = get_client()
     result = await client.list_portfolios(limit=limit)
     portfolios = result.get("portfolios", [])
@@ -117,36 +95,29 @@ async def list_portfolios(limit: int = 50) -> str:
     return _fmt({"total": result.get("total", len(summary)), "portfolios": summary})
 
 
-@mcp.tool()
-async def get_portfolio(portfolio_id: str) -> str:
-    """Get detailed information about a specific portfolio.
-
-    Args:
-        portfolio_id: The portfolio UUID
-    """
+@server.tool(
+    name="get_portfolio",
+    description="Get detailed information about a specific portfolio including assets and weights.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_portfolio(
+    portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
+) -> str:
     client = get_client()
     result = await client.get_portfolio(portfolio_id)
     return _fmt(result)
 
 
-@mcp.tool()
+@server.tool(
+    name="create_portfolio",
+    description="Create a new portfolio from tickers and weights. Weights should sum to 1.0. This automatically creates the underlying feature sets needed for modeling.",
+)
 async def create_portfolio(
-    name: str,
-    tickers: list[str],
-    weights: list[float],
-    description: str = "",
+    name: Annotated[str, Field(description="Portfolio name (e.g. 'Tech Portfolio')")],
+    tickers: Annotated[list[str], Field(description="Ticker symbols (e.g. ['AAPL', 'MSFT', 'NVDA'])")],
+    weights: Annotated[list[float], Field(description="Corresponding weights (e.g. [0.4, 0.3, 0.3])")],
+    description: Annotated[str, Field(description="Optional description", default="")] = "",
 ) -> str:
-    """Create a new portfolio from tickers and weights.
-
-    This automatically creates the underlying feature sets needed for modeling.
-    Weights should sum to 1.0.
-
-    Args:
-        name: Portfolio name (e.g. "Tech Portfolio")
-        tickers: List of ticker symbols (e.g. ["AAPL", "MSFT", "NVDA"])
-        weights: Corresponding weights (e.g. [0.4, 0.3, 0.3])
-        description: Optional description
-    """
     if len(tickers) != len(weights):
         return "Error: tickers and weights must have the same length"
 
@@ -159,9 +130,7 @@ async def create_portfolio(
         "assets": result.get("assets", []),
         "target_set_id": result.get("target_set_id"),
         "status": result.get("status"),
-        "message": "Portfolio created. To run factor analysis, you need trained models. "
-                   "Use list_model_groups to check for existing models, or create_models "
-                   "to create new ones.",
+        "message": "Portfolio created. Use list_model_groups to check for existing models, or create_models to create new ones.",
     })
 
 
@@ -170,30 +139,18 @@ async def create_portfolio(
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="analyze_qualitative",
+    description="Run GRAIN qualitative analysis on tickers for specific themes. Analyzes SEC filings (10-K, 10-Q) and earnings call transcripts to score thematic exposures. Returns scores, evidence passages, and source breakdowns. Auto-polls until results are ready (up to 5 minutes).",
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+)
 async def analyze_qualitative(
-    tickers: list[str],
-    themes: list[str],
-    source_types: list[str] | None = None,
-    min_year: int | None = None,
-    max_year: int | None = None,
+    tickers: Annotated[list[str], Field(description="Tickers to analyze (e.g. ['AAPL', 'MSFT'])")],
+    themes: Annotated[list[str], Field(description="Themes to score (e.g. ['AI exposure', 'China risk', 'debt levels'])")],
+    source_types: Annotated[list[str] | None, Field(description="Optional filter: ['10-K', '10-Q', 'earnings_transcript']", default=None)] = None,
+    min_year: Annotated[int | None, Field(description="Earliest filing year to include", default=None)] = None,
+    max_year: Annotated[int | None, Field(description="Latest filing year to include", default=None)] = None,
 ) -> str:
-    """Run GRAIN qualitative analysis on tickers for specific themes.
-
-    Analyzes SEC filings (10-K, 10-Q) and earnings call transcripts to score
-    how exposed each ticker is to the given themes. Returns scores, evidence
-    passages, and source breakdowns.
-
-    This is an async operation — the tool will poll until results are ready
-    (up to 5 minutes).
-
-    Args:
-        tickers: Tickers to analyze (e.g. ["AAPL", "MSFT"])
-        themes: Themes to score (e.g. ["AI exposure", "China risk", "debt levels"])
-        source_types: Optional filter: ["10-K", "10-Q", "earnings_transcript"]
-        min_year: Earliest filing year to include
-        max_year: Latest filing year to include
-    """
     client = get_client()
     job = await client.start_grain_analysis(
         tickers=tickers,
@@ -243,7 +200,6 @@ async def analyze_qualitative(
                 "confidence": ts.get("confidence"),
                 "top_evidence": [],
             }
-            # Include top 3 evidence passages
             for ev in (ts.get("evidence") or [])[:3]:
                 ticker_entry["top_evidence"].append({
                     "passage": ev.get("passage", "")[:300],
@@ -258,15 +214,14 @@ async def analyze_qualitative(
     return _fmt(summary)
 
 
-@mcp.tool()
-async def get_analysis_status(job_id: str) -> str:
-    """Check the status of a running GRAIN qualitative analysis.
-
-    Use this if analyze_qualitative timed out and you need to check progress.
-
-    Args:
-        job_id: The GRAIN job ID returned from analyze_qualitative
-    """
+@server.tool(
+    name="get_analysis_status",
+    description="Check the status of a running GRAIN qualitative analysis. Use this if analyze_qualitative timed out.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_analysis_status(
+    job_id: Annotated[str, Field(description="The GRAIN job ID from analyze_qualitative")],
+) -> str:
     client = get_client()
     result = await client.get_grain_job(job_id)
     return _fmt({
@@ -282,14 +237,12 @@ async def get_analysis_status(job_id: str) -> str:
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="list_model_groups",
+    description="List all model groups with their training and simulation status. A model group contains per-asset models sharing the same conditioning set (market factors).",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
 async def list_model_groups() -> str:
-    """List all model groups with their training and simulation status.
-
-    A model group contains per-asset models that share the same conditioning
-    set (market factors). This is the main way to see what's available for
-    simulation.
-    """
     client = get_client()
     groups = await client.list_model_groups()
     summary = []
@@ -314,32 +267,25 @@ async def list_model_groups() -> str:
     return _fmt(summary)
 
 
-@mcp.tool()
+@server.tool(
+    name="list_feature_set_templates",
+    description="List available conditioning set templates (predefined market factor sets). Use these when creating models — a conditioning set defines what factors the model learns exposures to.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
 async def list_feature_set_templates() -> str:
-    """List available conditioning set templates (predefined market factor sets).
-
-    Use these when creating models — a conditioning set defines what market
-    factors (VIX, rates, dollar index, etc.) the model learns exposures to.
-    """
     client = get_client()
     templates = await client.list_feature_set_templates()
     return _fmt(templates)
 
 
-@mcp.tool()
+@server.tool(
+    name="create_models",
+    description="Batch create per-asset factor models. Each ticker gets its own model that learns regime-dependent exposures to the factors in the conditioning set.",
+)
 async def create_models(
-    conditioning_set_id: str,
-    asset_tickers: list[str],
+    conditioning_set_id: Annotated[str, Field(description="UUID of the conditioning set (market factors)")],
+    asset_tickers: Annotated[list[str], Field(description="Tickers to create models for (e.g. ['AAPL', 'MSFT'])")],
 ) -> str:
-    """Batch create per-asset factor models for a set of tickers.
-
-    Each ticker gets its own model that learns regime-dependent exposures
-    to the factors in the conditioning set.
-
-    Args:
-        conditioning_set_id: UUID of the conditioning set (market factors)
-        asset_tickers: Tickers to create models for (e.g. ["AAPL", "MSFT"])
-    """
     client = get_client()
     result = await client.batch_create_models(
         conditioning_set_id=conditioning_set_id,
@@ -358,27 +304,15 @@ async def create_models(
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="train_models",
+    description="Start batch training for all models in a model group. Training runs on GPU. Use get_training_progress to monitor. Modes: single_shot_linear (fast, ~1 min), single_shot_nonlinear (~5 min), rollout_nonlinear (~15 min).",
+)
 async def train_models(
-    model_group_id: str,
-    training_mode: str = "single_shot_linear",
-    max_epochs: int = 100,
+    model_group_id: Annotated[str, Field(description="UUID of the model group to train")],
+    training_mode: Annotated[str, Field(description="Training mode", default="single_shot_linear")] = "single_shot_linear",
+    max_epochs: Annotated[int, Field(description="Maximum training epochs", default=100)] = 100,
 ) -> str:
-    """Start batch training for all models in a model group.
-
-    Training runs on GPU and takes 5-30 minutes per asset depending on
-    data size and training mode. Use get_training_progress to monitor.
-
-    Training modes (progressive complexity):
-    - single_shot_linear: Fast linear factor model (~5 min)
-    - single_shot_nonlinear: Nonlinear regime model (~15 min)
-    - rollout_nonlinear: Full generative rollout model (~30 min)
-
-    Args:
-        model_group_id: UUID of the model group to train
-        training_mode: Training mode (default: single_shot_linear)
-        max_epochs: Maximum training epochs (default: 100)
-    """
     client = get_client()
     result = await client.train_batch(
         model_group_id=model_group_id,
@@ -394,13 +328,14 @@ async def train_models(
     })
 
 
-@mcp.tool()
-async def get_training_progress(job_id: str) -> str:
-    """Check the progress of a batch training job.
-
-    Args:
-        job_id: The training job ID from train_models
-    """
+@server.tool(
+    name="get_training_progress",
+    description="Check the progress of a batch training job including current epoch, loss, and completion status.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_training_progress(
+    job_id: Annotated[str, Field(description="The training job ID from train_models")],
+) -> str:
     client = get_client()
     result = await client.get_batch_training_progress(job_id)
     return _fmt({
@@ -423,25 +358,16 @@ async def get_training_progress(job_id: str) -> str:
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="simulate_betas",
+    description="Compute regime-dependent factor exposures (betas) for all assets in a model group. Unlike static betas, these change based on current market conditions. Runs on GPU, auto-polls until ready (up to 5 min).",
+    annotations=ToolAnnotations(openWorldHint=True),
+)
 async def simulate_betas(
-    model_group_id: str,
-    simulation_mode: str = "single_shot_linear",
-    horizon: int = 20,
+    model_group_id: Annotated[str, Field(description="UUID of the trained model group")],
+    simulation_mode: Annotated[str, Field(description="Must match training mode", default="single_shot_linear")] = "single_shot_linear",
+    horizon: Annotated[int, Field(description="Forecast horizon in trading days", default=20)] = 20,
 ) -> str:
-    """Compute regime-dependent factor exposures (betas) for all assets in a model group.
-
-    This reveals how each asset's returns respond to market factors like VIX,
-    interest rates, dollar strength etc. Unlike static betas, these are
-    regime-dependent — they change based on current market conditions.
-
-    Runs on GPU. Auto-polls until results are ready (up to 5 min).
-
-    Args:
-        model_group_id: UUID of the trained model group
-        simulation_mode: Must match training mode (default: single_shot_linear)
-        horizon: Forecast horizon in trading days (default: 20)
-    """
     client = get_client()
     batch = await client.simulate_betas_batch(
         model_group_id=model_group_id,
@@ -460,7 +386,6 @@ async def simulate_betas(
             "message": "Simulation still running. Use get_betas_results to check later.",
         })
 
-    # Summarize
     per_asset = results.get("per_asset_results", {})
     summary = {
         "simulation_batch_id": sim_batch_id,
@@ -485,16 +410,14 @@ async def simulate_betas(
     return _fmt(summary)
 
 
-@mcp.tool()
-async def get_betas_results(simulation_batch_id: str) -> str:
-    """Get detailed factor beta results from a completed simulation batch.
-
-    Includes per-asset betas, sensitivity curves, factor statistics,
-    and residual correlations.
-
-    Args:
-        simulation_batch_id: The simulation batch ID from simulate_betas
-    """
+@server.tool(
+    name="get_betas_results",
+    description="Get detailed factor beta results from a completed simulation batch. Includes per-asset betas, sensitivity curves, factor statistics, and residual correlations.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_betas_results(
+    simulation_batch_id: Annotated[str, Field(description="The simulation batch ID from simulate_betas")],
+) -> str:
     client = get_client()
     results = await client.get_betas_batch_results(simulation_batch_id)
     return _fmt(results)
@@ -505,24 +428,16 @@ async def get_betas_results(simulation_batch_id: str) -> str:
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="simulate_returns",
+    description="Simulate return distributions under a specific factor scenario. Given factor values (e.g. VIX=35 for stress), samples thousands of possible return outcomes. Auto-polls until ready.",
+    annotations=ToolAnnotations(openWorldHint=True),
+)
 async def simulate_returns(
-    simulation_batch_id: str,
-    factors: dict[str, float],
-    n_samples: int = 5000,
+    simulation_batch_id: Annotated[str, Field(description="From simulate_betas")],
+    factors: Annotated[dict[str, float], Field(description="Factor scenario values (e.g. {'VIX': 35, 'DXY': 110})")],
+    n_samples: Annotated[int, Field(description="Number of Monte Carlo samples", default=5000)] = 5000,
 ) -> str:
-    """Simulate return distributions under a specific factor scenario.
-
-    Given factor values (e.g. VIX=35 for stress, DXY=110 for strong dollar),
-    samples thousands of possible return outcomes using the trained model.
-
-    Auto-polls until results are ready.
-
-    Args:
-        simulation_batch_id: From simulate_betas
-        factors: Factor scenario values (e.g. {"VIX": 35, "DXY": 110, "TLT": 4.5})
-        n_samples: Number of Monte Carlo samples (default: 5000)
-    """
     client = get_client()
     batch = await client.simulate_returns_batch(
         simulation_batch_id=simulation_batch_id,
@@ -531,7 +446,6 @@ async def simulate_returns(
     )
     returns_batch_id = batch.get("returns_batch_id")
 
-    # Poll until complete
     results = await client.poll_returns_batch(returns_batch_id)
 
     if not results:
@@ -544,13 +458,14 @@ async def simulate_returns(
     return _fmt(results)
 
 
-@mcp.tool()
-async def get_returns_results(returns_batch_id: str) -> str:
-    """Get results from a completed returns simulation.
-
-    Args:
-        returns_batch_id: The returns batch ID from simulate_returns
-    """
+@server.tool(
+    name="get_returns_results",
+    description="Get results from a completed returns simulation.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_returns_results(
+    returns_batch_id: Annotated[str, Field(description="The returns batch ID from simulate_returns")],
+) -> str:
     client = get_client()
     results = await client.get_returns_batch_results(returns_batch_id)
     return _fmt(results)
@@ -561,20 +476,15 @@ async def get_returns_results(returns_batch_id: str) -> str:
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="test_portfolio_risk",
+    description="Run a portfolio risk test using simulation results. Returns portfolio-level factor betas, expected return, VaR, CVaR, risk contribution per factor, and marginal contribution per asset.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
 async def test_portfolio_risk(
-    simulation_batch_id: str,
-    weights: dict[str, float],
+    simulation_batch_id: Annotated[str, Field(description="From simulate_betas")],
+    weights: Annotated[dict[str, float], Field(description="Portfolio weights by ticker (e.g. {'AAPL': 0.4, 'MSFT': 0.3})")],
 ) -> str:
-    """Run a portfolio risk test using simulation results.
-
-    Computes portfolio-level factor betas, expected return, VaR, CVaR,
-    risk contribution per factor, and marginal contribution to risk per asset.
-
-    Args:
-        simulation_batch_id: From simulate_betas
-        weights: Portfolio weights by ticker (e.g. {"AAPL": 0.4, "MSFT": 0.3, "NVDA": 0.3})
-    """
     client = get_client()
     result = await client.portfolio_test(simulation_batch_id, weights)
     return _fmt({
@@ -596,26 +506,16 @@ async def test_portfolio_risk(
 # ══════════════════════════════════════════════════
 
 
-@mcp.tool()
+@server.tool(
+    name="create_scenario",
+    description="Create a named what-if scenario. Each factor uses: {'type': 'fixed', 'value': 35} for exact value, {'type': 'percentile', 'value': 95} for historical percentile, or {'type': 'shock', 'value': 2.0} for std dev shift.",
+)
 async def create_scenario(
-    model_id: str,
-    name: str,
-    factor_values: dict[str, dict],
-    description: str = "",
+    model_id: Annotated[str, Field(description="UUID of the model this scenario applies to")],
+    name: Annotated[str, Field(description="Scenario name (e.g. 'Recession', 'Tech Bubble')")],
+    factor_values: Annotated[dict[str, dict], Field(description="Factor specs (e.g. {'VIX': {'type': 'fixed', 'value': 35}})")],
+    description: Annotated[str, Field(description="Optional description", default="")] = "",
 ) -> str:
-    """Create a named what-if scenario for factor simulation.
-
-    Each factor can be set using different spec types:
-    - {"type": "fixed", "value": 35} — set to exact value
-    - {"type": "percentile", "value": 95} — set to historical percentile
-    - {"type": "shock", "value": 2.0} — shift by N standard deviations
-
-    Args:
-        model_id: UUID of the model this scenario applies to
-        name: Scenario name (e.g. "Recession", "Tech Bubble")
-        factor_values: Factor specifications (e.g. {"VIX": {"type": "fixed", "value": 35}})
-        description: Optional description of the scenario
-    """
     client = get_client()
     result = await client.create_scenario(
         model_id=model_id,
@@ -631,13 +531,14 @@ async def create_scenario(
     })
 
 
-@mcp.tool()
-async def list_scenarios(model_id: str | None = None) -> str:
-    """List existing scenarios, optionally filtered by model.
-
-    Args:
-        model_id: Optional model UUID to filter by
-    """
+@server.tool(
+    name="list_scenarios",
+    description="List existing scenarios, optionally filtered by model.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def list_scenarios(
+    model_id: Annotated[str | None, Field(description="Optional model UUID to filter by", default=None)] = None,
+) -> str:
     client = get_client()
     result = await client.list_scenarios(model_id=model_id)
     scenarios = result.get("scenarios", [])
@@ -660,7 +561,12 @@ async def list_scenarios(model_id: str | None = None) -> str:
 
 
 def main():
-    mcp.run()
+    transport = os.getenv("MCP_TRANSPORT", "streamable-http")
+    port = int(os.getenv("MCP_PORT", "8000"))
+    if transport == "stdio":
+        server.run(transport="stdio")
+    else:
+        server.run(transport="streamable-http", port=port)
 
 
 if __name__ == "__main__":
