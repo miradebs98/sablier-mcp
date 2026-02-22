@@ -15,7 +15,7 @@ When connected to an AI assistant (Claude, GPT, etc.), the agent can:
 
 ### 1. Get a Sablier API Key
 
-Sign up at [sablier.io](https://sablier.io) and generate an API key from the dashboard.
+Sign up at [sablier-ai.com](https://sablier-ai.com) and generate an API key from the dashboard.
 
 ### 2. Install
 
