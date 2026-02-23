@@ -6,6 +6,7 @@ qualitative analysis, portfolio risk testing, and return simulation
 through the Sablier platform.
 
 Supports both local (stdio) and remote (streamable-http) transport.
+Remote mode uses OAuth 2.0 — Claude Desktop opens a browser for login.
 """
 
 import json
@@ -14,6 +15,8 @@ import re
 import urllib.parse
 from typing import Annotated
 
+from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.types import (
     EmbeddedResource,
     TextContent,
@@ -21,8 +24,8 @@ from mcp.types import (
     ToolAnnotations,
 )
 from pydantic import Field
-from mcp_use import MCPServer
 
+from sablier_mcp.auth import SablierOAuthProvider, current_sablier_jwt, login_page
 from sablier_mcp.client import SablierClient, SablierAPIError
 from sablier_mcp.widgets import (
     betas_heatmap,
@@ -32,16 +35,78 @@ from sablier_mcp.widgets import (
     training_progress,
 )
 
-server = MCPServer(name="Sablier", version="0.1.0")
 
-_client: SablierClient | None = None
+# ══════════════════════════════════════════════════
+# Server setup
+# ══════════════════════════════════════════════════
+
+_transport = os.getenv("MCP_TRANSPORT", "streamable-http")
+_oauth_provider: SablierOAuthProvider | None = None
+
+if _transport != "stdio":
+    # Remote mode: enable OAuth
+    _oauth_provider = SablierOAuthProvider()
+    _port = int(os.getenv("MCP_PORT", "8000"))
+    _issuer_url = os.getenv("MCP_ISSUER_URL", f"http://localhost:{_port}")
+    server = FastMCP(
+        name="Sablier",
+        host="0.0.0.0",
+        port=_port,
+        auth_server_provider=_oauth_provider,
+        auth=AuthSettings(
+            issuer_url=_issuer_url,
+            resource_server_url=_issuer_url,
+            client_registration_options=ClientRegistrationOptions(enabled=True),
+            required_scopes=[],
+        ),
+    )
+else:
+    # Local/stdio mode: no auth (uses SABLIER_API_KEY from env)
+    server = FastMCP(name="Sablier")
+
+
+# ── Custom routes (remote mode only) ─────────────
+
+if _oauth_provider is not None:
+    from starlette.responses import Response
+
+    @server.custom_route("/login", methods=["GET", "POST"])
+    async def _login_handler(request) -> Response:
+        return await login_page(request, _oauth_provider)
+
+
+# ══════════════════════════════════════════════════
+# Client management
+# ══════════════════════════════════════════════════
+
+_stdio_client: SablierClient | None = None
+_jwt_clients: dict[str, SablierClient] = {}
 
 
 def get_client() -> SablierClient:
-    global _client
-    if _client is None:
-        _client = SablierClient()
-    return _client
+    """Get a SablierClient for the current user.
+
+    In remote (OAuth) mode: uses the JWT from the authenticated session.
+    In stdio mode: uses SABLIER_API_KEY from the environment.
+    """
+    global _stdio_client
+
+    # Check for OAuth JWT (set by the auth middleware)
+    jwt = current_sablier_jwt.get(None)
+    if jwt:
+        if jwt not in _jwt_clients:
+            _jwt_clients[jwt] = SablierClient.from_token(jwt)
+        return _jwt_clients[jwt]
+
+    # Fallback: stdio mode with API key
+    if _stdio_client is None:
+        _stdio_client = SablierClient()
+    return _stdio_client
+
+
+# ══════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════
 
 
 def _fmt(data) -> str:
@@ -97,6 +162,54 @@ def _portfolio_tickers(portfolio: dict) -> list[str]:
     return [a.get("ticker") for a in assets if a.get("ticker")]
 
 
+def _flatten_betas(results: dict) -> dict:
+    """Flatten the nested betas API response into a widget-friendly format.
+
+    The API returns per_asset_results keyed by model UUID, with nested dicts
+    for linear_betas ({display_name: {factor: float}}), alpha, residual_std.
+    Factor stats (means, stds) are returned as parallel lists.
+
+    This flattens everything so:
+    - assets is keyed by display name (e.g. "Apple Inc.")
+    - linear_betas is flat {factor: float}
+    - alpha / residual_std are plain floats
+    - factor_means / factor_stds are dicts {factor: float}
+    """
+    features = results.get("conditioning_features", [])
+    factor_stats = results.get("factor_stats", {})
+    factor_names = factor_stats.get("factor_names", features)
+
+    # Flatten per-asset data
+    per_asset = results.get("per_asset_results", {})
+    assets = {}
+    for _model_id, data in per_asset.items():
+        lb = data.get("linear_betas", {})
+        alpha_dict = data.get("alpha", {}) or {}
+        resid_dict = data.get("residual_std", {}) or {}
+
+        # Each model maps to one asset by display name
+        for display_name, betas in lb.items():
+            assets[display_name] = {
+                "status": data.get("status"),
+                "linear_betas": betas if isinstance(betas, dict) else {},
+                "alpha": alpha_dict.get(display_name) if isinstance(alpha_dict, dict) else alpha_dict,
+                "residual_std": resid_dict.get(display_name) if isinstance(resid_dict, dict) else resid_dict,
+            }
+
+    # Convert parallel lists to dicts
+    means_list = factor_stats.get("factor_means", [])
+    stds_list = factor_stats.get("factor_stds", [])
+    factor_means = dict(zip(factor_names, means_list)) if means_list else {}
+    factor_stds = dict(zip(factor_names, stds_list)) if stds_list else {}
+
+    return {
+        "conditioning_features": features,
+        "assets": assets,
+        "factor_means": factor_means,
+        "factor_stds": factor_stds,
+    }
+
+
 async def _ensure_portfolio(
     portfolio_id: str | None,
     tickers: list[str] | None,
@@ -144,7 +257,13 @@ _NOT_LOGGED_IN = (
 
 
 def _require_auth() -> str | None:
-    """Return an error string if not authenticated, else None."""
+    """Return an error string if not authenticated, else None.
+
+    In remote (OAuth) mode the SDK middleware handles auth, so this
+    always passes.  In stdio mode it checks SABLIER_API_KEY.
+    """
+    if current_sablier_jwt.get(None):
+        return None  # OAuth-authenticated
     client = get_client()
     if not client.is_authenticated:
         return _NOT_LOGGED_IN
@@ -162,7 +281,7 @@ def _require_auth() -> str | None:
         "Create a free Sablier account. This is the first step for new users. "
         "After signing up, the user will receive a verification email — "
         "they must click the link to activate their account. "
-        "Once verified, they can use the login tool to start analyzing."
+        "Once verified, they can log in via the browser prompt (remote) or the login tool (local)."
     ),
 )
 async def create_account(
@@ -198,11 +317,10 @@ async def create_account(
 @server.tool(
     name="login",
     description=(
-        "Log in to Sablier with email and password. This authenticates the session "
-        "so you can access portfolios, run analyses, and manage scenarios. "
-        "The user must have a verified account (created via create_account). "
-        "IMPORTANT: Always start here if the user hasn't logged in yet. "
-        "After login, the user can also access the Sablier web UI with the same credentials."
+        "Log in to Sablier with email and password (for local/stdio mode). "
+        "If connected via Claude Desktop or another remote client, authentication "
+        "happens automatically via the browser — this tool is not needed. "
+        "The user must have a verified account (created via create_account)."
     ),
 )
 async def login(
@@ -683,26 +801,13 @@ async def simulate_betas(
                 "message": "Simulation still running. Use get_betas_results to check later.",
             })
 
-        per_asset = results.get("per_asset_results", {})
+        flat = _flatten_betas(results)
         summary = {
             "simulation_batch_id": sim_batch_id,
-            "conditioning_features": results.get("conditioning_features", []),
             "completed": results.get("completed_count"),
             "total": results.get("total_count"),
-            "assets": {},
+            **flat,
         }
-        for asset, asset_data in per_asset.items():
-            summary["assets"][asset] = {
-                "status": asset_data.get("status"),
-                "linear_betas": asset_data.get("linear_betas"),
-                "alpha": asset_data.get("alpha"),
-                "residual_std": asset_data.get("residual_std"),
-            }
-
-        factor_stats = results.get("factor_stats", {})
-        if factor_stats:
-            summary["factor_means"] = factor_stats.get("means")
-            summary["factor_stds"] = factor_stats.get("stds")
 
         return _with_widget(_fmt(summary), betas_heatmap(summary))
     except SablierAPIError as e:
@@ -1005,33 +1110,19 @@ async def run_full_analysis(
             })
 
         # Build summary
-        per_asset = results.get("per_asset_results", {})
+        flat = _flatten_betas(results)
         summary = {
             "status": "completed",
             "model_group_id": model_group_id,
             "simulation_batch_id": sim_batch_id,
             "portfolio_id": portfolio_id,
             "models_created": total_created,
-            "conditioning_features": results.get("conditioning_features", []),
-            "assets": {},
+            **flat,
+            "next_steps": (
+                "Use test_portfolio_risk with simulation_batch_id and portfolio weights to get VaR/CVaR, "
+                "or simulate_returns with factor values to generate return distributions under a scenario."
+            ),
         }
-        for asset, asset_data in per_asset.items():
-            summary["assets"][asset] = {
-                "status": asset_data.get("status"),
-                "linear_betas": asset_data.get("linear_betas"),
-                "alpha": asset_data.get("alpha"),
-                "residual_std": asset_data.get("residual_std"),
-            }
-
-        factor_stats = results.get("factor_stats", {})
-        if factor_stats:
-            summary["factor_means"] = factor_stats.get("means")
-            summary["factor_stds"] = factor_stats.get("stds")
-
-        summary["next_steps"] = (
-            "Use test_portfolio_risk with simulation_batch_id and portfolio weights to get VaR/CVaR, "
-            "or simulate_returns with factor values to generate return distributions under a scenario."
-        )
 
         return _with_widget(_fmt(summary), betas_heatmap(summary))
     except SablierAPIError as e:
@@ -1044,12 +1135,10 @@ async def run_full_analysis(
 
 
 def main():
-    transport = os.getenv("MCP_TRANSPORT", "streamable-http")
-    port = int(os.getenv("MCP_PORT", "8000"))
-    if transport == "stdio":
+    if _transport == "stdio":
         server.run(transport="stdio")
     else:
-        server.run(transport="streamable-http", port=port)
+        server.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

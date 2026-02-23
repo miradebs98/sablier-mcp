@@ -39,6 +39,22 @@ class SablierClient:
         if self._auth_token:
             self._client.headers["Authorization"] = f"Bearer {self._auth_token}"
 
+    @classmethod
+    def from_token(cls, jwt_token: str) -> "SablierClient":
+        """Create a client pre-authenticated with a specific JWT (for OAuth flow)."""
+        instance = cls.__new__(cls)
+        instance.base_url = os.getenv("SABLIER_API_URL", DEFAULT_BASE_URL).rstrip("/")
+        instance._auth_token = jwt_token
+        instance._client = httpx.AsyncClient(
+            base_url=instance.base_url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {jwt_token}",
+            },
+            timeout=DEFAULT_TIMEOUT,
+        )
+        return instance
+
     @property
     def is_authenticated(self) -> bool:
         return self._auth_token is not None
