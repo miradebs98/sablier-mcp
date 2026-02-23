@@ -10,6 +10,7 @@ Supports both local (stdio) and remote (streamable-http) transport.
 
 import json
 import os
+import re
 import urllib.parse
 from typing import Annotated
 
@@ -48,6 +49,25 @@ def _fmt(data) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _validate_uuid(value: str, label: str = "ID") -> str | None:
+    """Return an error string if value is not a valid UUID, else None."""
+    if not _UUID_RE.match(value):
+        return f"Error: '{value}' is not a valid {label}. Expected a UUID like '8f3a1b2c-...'. Use the relevant list tool to find valid IDs."
+    return None
+
+
+def _api_error(e: SablierAPIError) -> str:
+    """Convert an API error into a friendly message for the LLM."""
+    if e.status_code == 404:
+        return f"Error: Not found — {e.detail}"
+    if e.status_code == 422:
+        return f"Error: Invalid input — {e.detail}"
+    return f"Error: API returned {e.status_code} — {e.detail}"
+
+
 def _with_widget(text: str, html: str) -> list:
     """Return both a text summary (for the LLM) and an HTML widget (for visual clients)."""
     return [
@@ -78,21 +98,24 @@ async def search_features(
     is_asset: Annotated[bool | None, Field(description="If True, only assets. If False, only indicators.", default=None)] = None,
     limit: Annotated[int, Field(description="Max results (default 20)", default=20)] = 20,
 ) -> str:
-    client = get_client()
-    results = await client.search_features(query, is_asset=is_asset, limit=limit)
-    summary = []
-    for f in results:
-        entry = {
-            "ticker": f.get("ticker"),
-            "name": f.get("display_name"),
-            "source": f.get("source"),
-            "category": f.get("category"),
-            "is_asset": f.get("is_asset"),
-        }
-        if f.get("description"):
-            entry["description"] = f["description"]
-        summary.append(entry)
-    return _fmt(summary)
+    try:
+        client = get_client()
+        results = await client.search_features(query, is_asset=is_asset, limit=limit)
+        summary = []
+        for f in results:
+            entry = {
+                "ticker": f.get("ticker"),
+                "name": f.get("display_name"),
+                "source": f.get("source"),
+                "category": f.get("category"),
+                "is_asset": f.get("is_asset"),
+            }
+            if f.get("description"):
+                entry["description"] = f["description"]
+            summary.append(entry)
+        return _fmt(summary)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -108,20 +131,23 @@ async def search_features(
 async def list_portfolios(
     limit: Annotated[int, Field(description="Max portfolios to return", default=50)] = 50,
 ) -> list:
-    client = get_client()
-    result = await client.list_portfolios(limit=limit)
-    portfolios = result.get("portfolios", [])
-    summary = []
-    for p in portfolios:
-        summary.append({
-            "id": p["id"],
-            "name": p["name"],
-            "assets": p.get("assets", []),
-            "status": p.get("status"),
-            "created_at": p.get("created_at"),
-        })
-    data = {"total": result.get("total", len(summary)), "portfolios": summary}
-    return _with_widget(_fmt(data), portfolio_overview(data))
+    try:
+        client = get_client()
+        result = await client.list_portfolios(limit=limit)
+        portfolios = result.get("portfolios", [])
+        summary = []
+        for p in portfolios:
+            summary.append({
+                "id": p["id"],
+                "name": p["name"],
+                "assets": p.get("assets", []),
+                "status": p.get("status"),
+                "created_at": p.get("created_at"),
+            })
+        data = {"total": result.get("total", len(summary)), "portfolios": summary}
+        return _with_widget(_fmt(data), portfolio_overview(data))
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -132,9 +158,14 @@ async def list_portfolios(
 async def get_portfolio(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
 ) -> str:
-    client = get_client()
-    result = await client.get_portfolio(portfolio_id)
-    return _fmt(result)
+    if err := _validate_uuid(portfolio_id, "portfolio_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_portfolio(portfolio_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -150,17 +181,20 @@ async def create_portfolio(
     if len(tickers) != len(weights):
         return "Error: tickers and weights must have the same length"
 
-    assets = [{"ticker": t, "weight": w} for t, w in zip(tickers, weights)]
-    client = get_client()
-    result = await client.create_portfolio(name, assets, description=description or None)
-    return _fmt({
-        "id": result["id"],
-        "name": result["name"],
-        "assets": result.get("assets", []),
-        "target_set_id": result.get("target_set_id"),
-        "status": result.get("status"),
-        "message": "Portfolio created. Use list_model_groups to check for existing models, or create_models to create new ones.",
-    })
+    try:
+        assets = [{"ticker": t, "weight": w} for t, w in zip(tickers, weights)]
+        client = get_client()
+        result = await client.create_portfolio(name, assets, description=description or None)
+        return _fmt({
+            "id": result["id"],
+            "name": result["name"],
+            "assets": result.get("assets", []),
+            "target_set_id": result.get("target_set_id"),
+            "status": result.get("status"),
+            "message": "Portfolio created. Use list_model_groups to check for existing models, or create_models to create new ones.",
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -176,71 +210,74 @@ async def create_portfolio(
 async def analyze_qualitative(
     tickers: Annotated[list[str], Field(description="Tickers to analyze (e.g. ['AAPL', 'MSFT'])")],
     themes: Annotated[list[str], Field(description="Themes to score (e.g. ['AI exposure', 'China risk', 'debt levels'])")],
-    source_types: Annotated[list[str] | None, Field(description="Optional filter: ['10-K', '10-Q', 'earnings_transcript']", default=None)] = None,
+    source_types: Annotated[list[str] | None, Field(description="Optional filter: ['10-K', '10-Q', 'earnings_call']", default=None)] = None,
     min_year: Annotated[int | None, Field(description="Earliest filing year to include", default=None)] = None,
     max_year: Annotated[int | None, Field(description="Latest filing year to include", default=None)] = None,
 ) -> list | str:
-    client = get_client()
-    job = await client.start_grain_analysis(
-        tickers=tickers,
-        themes=themes,
-        source_types=source_types,
-        min_year=min_year,
-        max_year=max_year,
-    )
-    job_id = job["job_id"]
+    try:
+        client = get_client()
+        job = await client.start_grain_analysis(
+            tickers=tickers,
+            themes=themes,
+            source_types=source_types,
+            min_year=min_year,
+            max_year=max_year,
+        )
+        job_id = job["job_id"]
 
-    # Poll until complete
-    result = await client.poll_grain_job(job_id)
+        # Poll until complete
+        result = await client.poll_grain_job(job_id)
 
-    if result.get("status") == "failed":
-        return f"Analysis failed: {result.get('error_message', 'Unknown error')}"
+        if result.get("status") == "failed":
+            return f"Analysis failed: {result.get('error_message', 'Unknown error')}"
 
-    if result.get("status") != "completed":
-        return _fmt({
-            "status": result.get("status"),
-            "job_id": job_id,
-            "message": "Analysis still running. Use get_analysis_status with this job_id to check later.",
-        })
+        if result.get("status") != "completed":
+            return _fmt({
+                "status": result.get("status"),
+                "job_id": job_id,
+                "message": "Analysis still running. Use get_analysis_status with this job_id to check later.",
+            })
 
-    # Summarize results — API nests as results.results (list of theme objects)
-    raw_results = result.get("results", {})
-    themes_data = raw_results.get("results", []) or raw_results.get("themes", [])
-    summary = {
-        "status": "completed",
-        "processing_time_seconds": result.get("processing_time_seconds"),
-        "themes": [],
-    }
-    for theme in themes_data:
-        theme_summary = {
-            "theme": theme.get("theme"),
-            "display_name": theme.get("display_name"),
-            "portfolio_score": theme.get("portfolio_score") or theme.get("max_exposure", {}).get("score"),
-            "direction": theme.get("direction"),
-            "confidence": theme.get("confidence"),
-            "ticker_scores": [],
+        # Summarize results — API nests as results.results (list of theme objects)
+        raw_results = result.get("results", {})
+        themes_data = raw_results.get("results", []) or raw_results.get("themes", [])
+        summary = {
+            "status": "completed",
+            "processing_time_seconds": result.get("processing_time_seconds"),
+            "themes": [],
         }
-        for ts in theme.get("ticker_scores", []):
-            ticker_entry = {
-                "ticker": ts.get("ticker"),
-                "score": ts.get("score"),
-                "tier": ts.get("tier") or ts.get("tier_name"),
-                "direction": ts.get("direction"),
-                "confidence": ts.get("confidence"),
-                "top_evidence": [],
+        for theme in themes_data:
+            theme_summary = {
+                "theme": theme.get("theme"),
+                "display_name": theme.get("display_name"),
+                "portfolio_score": theme.get("portfolio_score") or theme.get("max_exposure", {}).get("score"),
+                "direction": theme.get("direction"),
+                "confidence": theme.get("confidence"),
+                "ticker_scores": [],
             }
-            for ev in (ts.get("evidence") or [])[:3]:
-                ticker_entry["top_evidence"].append({
-                    "passage": (ev.get("passage") or "")[:300],
-                    "source": ev.get("source"),
-                    "source_type": ev.get("source_type"),
-                    "fiscal_period": ev.get("fiscal_period"),
-                    "why_relevant": ev.get("why_relevant"),
-                })
-            theme_summary["ticker_scores"].append(ticker_entry)
-        summary["themes"].append(theme_summary)
+            for ts in theme.get("ticker_scores", []):
+                ticker_entry = {
+                    "ticker": ts.get("ticker"),
+                    "score": ts.get("score"),
+                    "tier": ts.get("tier") or ts.get("tier_name"),
+                    "direction": ts.get("direction"),
+                    "confidence": ts.get("confidence"),
+                    "top_evidence": [],
+                }
+                for ev in (ts.get("evidence") or [])[:3]:
+                    ticker_entry["top_evidence"].append({
+                        "passage": (ev.get("passage") or "")[:300],
+                        "source": ev.get("source"),
+                        "source_type": ev.get("source_type"),
+                        "fiscal_period": ev.get("fiscal_period"),
+                        "why_relevant": ev.get("why_relevant"),
+                    })
+                theme_summary["ticker_scores"].append(ticker_entry)
+            summary["themes"].append(theme_summary)
 
-    return _with_widget(_fmt(summary), grain_score_card(summary))
+        return _with_widget(_fmt(summary), grain_score_card(summary))
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -251,14 +288,19 @@ async def analyze_qualitative(
 async def get_analysis_status(
     job_id: Annotated[str, Field(description="The GRAIN job ID from analyze_qualitative")],
 ) -> str:
-    client = get_client()
-    result = await client.get_grain_job(job_id)
-    return _fmt({
-        "job_id": job_id,
-        "status": result.get("status"),
-        "progress": result.get("progress"),
-        "error_message": result.get("error_message"),
-    })
+    if err := _validate_uuid(job_id, "job_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_grain_job(job_id)
+        return _fmt({
+            "job_id": job_id,
+            "status": result.get("status"),
+            "progress": result.get("progress"),
+            "error_message": result.get("error_message"),
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -272,28 +314,31 @@ async def get_analysis_status(
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def list_model_groups() -> str:
-    client = get_client()
-    groups = await client.list_model_groups()
-    summary = []
-    for g in groups:
-        models = g.get("models", [])
-        summary.append({
-            "id": g["id"],
-            "name": g.get("name"),
-            "conditioning_set": g.get("conditioning_set_name"),
-            "status": g.get("status"),
-            "model_count": len(models),
-            "models": [
-                {
-                    "asset": m.get("asset_id"),
-                    "status": m.get("status"),
-                    "model_id": m.get("model_id"),
-                }
-                for m in models
-            ],
-            "latest_simulation": g.get("latest_simulation"),
-        })
-    return _fmt(summary)
+    try:
+        client = get_client()
+        groups = await client.list_model_groups()
+        summary = []
+        for g in groups:
+            models = g.get("models", [])
+            summary.append({
+                "id": g["id"],
+                "name": g.get("name"),
+                "conditioning_set": g.get("conditioning_set_name"),
+                "status": g.get("status"),
+                "model_count": len(models),
+                "models": [
+                    {
+                        "asset": m.get("asset_id"),
+                        "status": m.get("status"),
+                        "model_id": m.get("model_id"),
+                    }
+                    for m in models
+                ],
+                "latest_simulation": g.get("latest_simulation"),
+            })
+        return _fmt(summary)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -302,9 +347,12 @@ async def list_model_groups() -> str:
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def list_feature_set_templates() -> str:
-    client = get_client()
-    templates = await client.list_feature_set_templates()
-    return _fmt(templates)
+    try:
+        client = get_client()
+        templates = await client.list_feature_set_templates()
+        return _fmt(templates)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -315,17 +363,22 @@ async def create_models(
     conditioning_set_id: Annotated[str, Field(description="UUID of the conditioning set (market factors)")],
     asset_tickers: Annotated[list[str], Field(description="Tickers to create models for (e.g. ['AAPL', 'MSFT'])")],
 ) -> str:
-    client = get_client()
-    result = await client.batch_create_models(
-        conditioning_set_id=conditioning_set_id,
-        asset_tickers=asset_tickers,
-    )
-    return _fmt({
-        "total_created": result.get("total_created"),
-        "total_failed": result.get("total_failed"),
-        "models": result.get("models", []),
-        "message": "Models created. Use train_models with the model_group_id to start training.",
-    })
+    if err := _validate_uuid(conditioning_set_id, "conditioning_set_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.batch_create_models(
+            conditioning_set_id=conditioning_set_id,
+            asset_tickers=asset_tickers,
+        )
+        return _fmt({
+            "total_created": result.get("total_created"),
+            "total_failed": result.get("total_failed"),
+            "models": result.get("models", []),
+            "message": "Models created. Use train_models with the model_group_id to start training.",
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -342,19 +395,24 @@ async def train_models(
     training_mode: Annotated[str, Field(description="Training mode", default="single_shot_linear")] = "single_shot_linear",
     max_epochs: Annotated[int, Field(description="Maximum training epochs", default=100)] = 100,
 ) -> str:
-    client = get_client()
-    result = await client.train_batch(
-        model_group_id=model_group_id,
-        training_mode=training_mode,
-        max_epochs=max_epochs,
-    )
-    return _fmt({
-        "batch_id": result.get("batch_id"),
-        "job_id": result.get("job_id"),
-        "status": result.get("status"),
-        "total_models": result.get("total_models"),
-        "message": "Training started. Use get_training_progress with the job_id to monitor.",
-    })
+    if err := _validate_uuid(model_group_id, "model_group_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.train_batch(
+            model_group_id=model_group_id,
+            training_mode=training_mode,
+            max_epochs=max_epochs,
+        )
+        return _fmt({
+            "batch_id": result.get("batch_id"),
+            "job_id": result.get("job_id"),
+            "status": result.get("status"),
+            "total_models": result.get("total_models"),
+            "message": "Training started. Use get_training_progress with the job_id to monitor.",
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -365,22 +423,27 @@ async def train_models(
 async def get_training_progress(
     job_id: Annotated[str, Field(description="The training job ID from train_models")],
 ) -> list:
-    client = get_client()
-    result = await client.get_batch_training_progress(job_id)
-    data = {
-        "job_id": result.get("job_id"),
-        "status": result.get("status"),
-        "current_asset": result.get("current_asset"),
-        "completed_models": result.get("completed_models"),
-        "total_models": result.get("total_models"),
-        "progress_percent": result.get("progress_percent"),
-        "current_epoch": result.get("current_epoch"),
-        "max_epochs": result.get("max_epochs"),
-        "train_loss": result.get("train_loss"),
-        "val_loss": result.get("val_loss"),
-        "error_message": result.get("error_message"),
-    }
-    return _with_widget(_fmt(data), training_progress(data))
+    if err := _validate_uuid(job_id, "job_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_batch_training_progress(job_id)
+        data = {
+            "job_id": result.get("job_id"),
+            "status": result.get("status"),
+            "current_asset": result.get("current_asset"),
+            "completed_models": result.get("completed_models"),
+            "total_models": result.get("total_models"),
+            "progress_percent": result.get("progress_percent"),
+            "current_epoch": result.get("current_epoch"),
+            "max_epochs": result.get("max_epochs"),
+            "train_loss": result.get("train_loss"),
+            "val_loss": result.get("val_loss"),
+            "error_message": result.get("error_message"),
+        }
+        return _with_widget(_fmt(data), training_progress(data))
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -398,48 +461,53 @@ async def simulate_betas(
     simulation_mode: Annotated[str, Field(description="Must match training mode", default="single_shot_linear")] = "single_shot_linear",
     horizon: Annotated[int, Field(description="Forecast horizon in trading days", default=20)] = 20,
 ) -> list | str:
-    client = get_client()
-    batch = await client.simulate_betas_batch(
-        model_group_id=model_group_id,
-        simulation_mode=simulation_mode,
-        horizon=horizon,
-    )
-    sim_batch_id = batch.get("simulation_batch_id")
+    if err := _validate_uuid(model_group_id, "model_group_id"):
+        return err
+    try:
+        client = get_client()
+        batch = await client.simulate_betas_batch(
+            model_group_id=model_group_id,
+            simulation_mode=simulation_mode,
+            horizon=horizon,
+        )
+        sim_batch_id = batch.get("simulation_batch_id")
 
-    # Poll until complete
-    results = await client.poll_betas_batch(sim_batch_id)
+        # Poll until complete
+        results = await client.poll_betas_batch(sim_batch_id)
 
-    if not results or not results.get("all_completed"):
-        return _fmt({
+        if not results or not results.get("all_completed"):
+            return _fmt({
+                "simulation_batch_id": sim_batch_id,
+                "status": "running",
+                "completed": results.get("completed_count", 0) if results else 0,
+                "total": results.get("total_count", 0) if results else 0,
+                "message": "Simulation still running. Use get_betas_results to check later.",
+            })
+
+        per_asset = results.get("per_asset_results", {})
+        summary = {
             "simulation_batch_id": sim_batch_id,
-            "status": "running",
-            "completed": results.get("completed_count", 0) if results else 0,
-            "total": results.get("total_count", 0) if results else 0,
-            "message": "Simulation still running. Use get_betas_results to check later.",
-        })
-
-    per_asset = results.get("per_asset_results", {})
-    summary = {
-        "simulation_batch_id": sim_batch_id,
-        "conditioning_features": results.get("conditioning_features", []),
-        "completed": results.get("completed_count"),
-        "total": results.get("total_count"),
-        "assets": {},
-    }
-    for asset, asset_data in per_asset.items():
-        summary["assets"][asset] = {
-            "status": asset_data.get("status"),
-            "linear_betas": asset_data.get("linear_betas"),
-            "alpha": asset_data.get("alpha"),
-            "residual_std": asset_data.get("residual_std"),
+            "conditioning_features": results.get("conditioning_features", []),
+            "completed": results.get("completed_count"),
+            "total": results.get("total_count"),
+            "assets": {},
         }
+        for asset, asset_data in per_asset.items():
+            summary["assets"][asset] = {
+                "status": asset_data.get("status"),
+                "linear_betas": asset_data.get("linear_betas"),
+                "alpha": asset_data.get("alpha"),
+                "residual_std": asset_data.get("residual_std"),
+            }
 
-    factor_stats = results.get("factor_stats", {})
-    if factor_stats:
-        summary["factor_means"] = factor_stats.get("means")
-        summary["factor_stds"] = factor_stats.get("stds")
+        factor_stats = results.get("factor_stats", {})
+        if factor_stats:
+            summary["factor_means"] = factor_stats.get("means")
+            summary["factor_stds"] = factor_stats.get("stds")
 
-    return _with_widget(_fmt(summary), betas_heatmap(summary))
+        return _with_widget(_fmt(summary), betas_heatmap(summary))
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -450,9 +518,14 @@ async def simulate_betas(
 async def get_betas_results(
     simulation_batch_id: Annotated[str, Field(description="The simulation batch ID from simulate_betas")],
 ) -> str:
-    client = get_client()
-    results = await client.get_betas_batch_results(simulation_batch_id)
-    return _fmt(results)
+    if err := _validate_uuid(simulation_batch_id, "simulation_batch_id"):
+        return err
+    try:
+        client = get_client()
+        results = await client.get_betas_batch_results(simulation_batch_id)
+        return _fmt(results)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -470,24 +543,29 @@ async def simulate_returns(
     factors: Annotated[dict[str, float], Field(description="Factor scenario values (e.g. {'VIX': 35, 'DXY': 110})")],
     n_samples: Annotated[int, Field(description="Number of Monte Carlo samples", default=5000)] = 5000,
 ) -> str:
-    client = get_client()
-    batch = await client.simulate_returns_batch(
-        simulation_batch_id=simulation_batch_id,
-        factors=factors,
-        n_samples=n_samples,
-    )
-    returns_batch_id = batch.get("returns_batch_id")
+    if err := _validate_uuid(simulation_batch_id, "simulation_batch_id"):
+        return err
+    try:
+        client = get_client()
+        batch = await client.simulate_returns_batch(
+            simulation_batch_id=simulation_batch_id,
+            factors=factors,
+            n_samples=n_samples,
+        )
+        returns_batch_id = batch.get("returns_batch_id")
 
-    results = await client.poll_returns_batch(returns_batch_id)
+        results = await client.poll_returns_batch(returns_batch_id)
 
-    if not results or not results.get("all_completed"):
-        return _fmt({
-            "returns_batch_id": returns_batch_id,
-            "status": "running",
-            "message": "Returns simulation still running. Use get_returns_results to check later.",
-        })
+        if not results or not results.get("all_completed"):
+            return _fmt({
+                "returns_batch_id": returns_batch_id,
+                "status": "running",
+                "message": "Returns simulation still running. Use get_returns_results to check later.",
+            })
 
-    return _fmt(results)
+        return _fmt(results)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -498,9 +576,14 @@ async def simulate_returns(
 async def get_returns_results(
     returns_batch_id: Annotated[str, Field(description="The returns batch ID from simulate_returns")],
 ) -> str:
-    client = get_client()
-    results = await client.get_returns_batch_results(returns_batch_id)
-    return _fmt(results)
+    if err := _validate_uuid(returns_batch_id, "returns_batch_id"):
+        return err
+    try:
+        client = get_client()
+        results = await client.get_returns_batch_results(returns_batch_id)
+        return _fmt(results)
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -517,21 +600,26 @@ async def test_portfolio_risk(
     simulation_batch_id: Annotated[str, Field(description="From simulate_betas")],
     weights: Annotated[dict[str, float], Field(description="Portfolio weights by ticker (e.g. {'AAPL': 0.4, 'MSFT': 0.3})")],
 ) -> list:
-    client = get_client()
-    result = await client.portfolio_test(simulation_batch_id, weights)
-    data = {
-        "portfolio_betas": result.get("portfolio_betas"),
-        "weighted_beta": result.get("weighted_beta"),
-        "expected_return": result.get("expected_return"),
-        "portfolio_alpha": result.get("portfolio_alpha"),
-        "var_95": result.get("var_95"),
-        "cvar_95": result.get("cvar_95"),
-        "diversification_ratio": result.get("diversification_ratio"),
-        "risk_contribution": result.get("risk_contribution"),
-        "marginal_ctr": result.get("marginal_ctr"),
-        "n_assets": result.get("n_assets"),
-    }
-    return _with_widget(_fmt(data), risk_dashboard(data))
+    if err := _validate_uuid(simulation_batch_id, "simulation_batch_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.portfolio_test(simulation_batch_id, weights)
+        data = {
+            "portfolio_betas": result.get("portfolio_betas"),
+            "weighted_beta": result.get("weighted_beta"),
+            "expected_return": result.get("expected_return"),
+            "portfolio_alpha": result.get("portfolio_alpha"),
+            "var_95": result.get("var_95"),
+            "cvar_95": result.get("cvar_95"),
+            "diversification_ratio": result.get("diversification_ratio"),
+            "risk_contribution": result.get("risk_contribution"),
+            "marginal_ctr": result.get("marginal_ctr"),
+            "n_assets": result.get("n_assets"),
+        }
+        return _with_widget(_fmt(data), risk_dashboard(data))
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
@@ -549,19 +637,24 @@ async def create_scenario(
     factor_values: Annotated[dict[str, dict], Field(description="Factor specs (e.g. {'VIX': {'type': 'fixed', 'value': 35}})")],
     description: Annotated[str, Field(description="Optional description", default="")] = "",
 ) -> str:
-    client = get_client()
-    result = await client.create_scenario(
-        model_id=model_id,
-        name=name,
-        specs=factor_values,
-        description=description or None,
-    )
-    return _fmt({
-        "id": result["id"],
-        "name": result["name"],
-        "specs": result.get("specs"),
-        "message": "Scenario created. Use simulate_returns with the factor values to sample returns.",
-    })
+    if err := _validate_uuid(model_id, "model_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.create_scenario(
+            model_id=model_id,
+            name=name,
+            specs=factor_values,
+            description=description or None,
+        )
+        return _fmt({
+            "id": result["id"],
+            "name": result["name"],
+            "specs": result.get("specs"),
+            "message": "Scenario created. Use simulate_returns with the factor values to sample returns.",
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 @server.tool(
@@ -572,20 +665,26 @@ async def create_scenario(
 async def list_scenarios(
     model_id: Annotated[str | None, Field(description="Optional model UUID to filter by", default=None)] = None,
 ) -> str:
-    client = get_client()
-    result = await client.list_scenarios(model_id=model_id)
-    scenarios = result.get("scenarios", [])
-    summary = []
-    for s in scenarios:
-        summary.append({
-            "id": s["id"],
-            "name": s.get("name"),
-            "description": s.get("description"),
-            "specs": s.get("specs"),
-            "model_id": s.get("model_id"),
-            "created_at": s.get("created_at"),
-        })
-    return _fmt({"total": result.get("total", len(summary)), "scenarios": summary})
+    if model_id:
+        if err := _validate_uuid(model_id, "model_id"):
+            return err
+    try:
+        client = get_client()
+        result = await client.list_scenarios(model_id=model_id)
+        scenarios = result.get("scenarios", [])
+        summary = []
+        for s in scenarios:
+            summary.append({
+                "id": s["id"],
+                "name": s.get("name"),
+                "description": s.get("description"),
+                "specs": s.get("specs"),
+                "model_id": s.get("model_id"),
+                "created_at": s.get("created_at"),
+            })
+        return _fmt({"total": result.get("total", len(summary)), "scenarios": summary})
+    except SablierAPIError as e:
+        return _api_error(e)
 
 
 # ══════════════════════════════════════════════════
