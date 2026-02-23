@@ -8,8 +8,8 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 ENV MCP_TRANSPORT=streamable-http
-ENV MCP_PORT=8000
 
-EXPOSE 8000
+# Cloud Run sets PORT automatically (default 8080)
+EXPOSE 8080
 
 CMD ["sablier-mcp"]

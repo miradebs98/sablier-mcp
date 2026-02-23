@@ -46,7 +46,7 @@ _oauth_provider: SablierOAuthProvider | None = None
 if _transport != "stdio":
     # Remote mode: enable OAuth
     _oauth_provider = SablierOAuthProvider()
-    _port = int(os.getenv("MCP_PORT", "8000"))
+    _port = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
     _issuer_url = os.getenv("MCP_ISSUER_URL", f"http://localhost:{_port}")
     server = FastMCP(
         name="Sablier",
