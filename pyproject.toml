@@ -1,7 +1,7 @@
 [project]
 name = "sablier-mcp"
 version = "0.1.0"
-description = "MCP server for Sablier — AI-powered regime-dependent factor modeling and portfolio analytics"
+description = "Sablier MCP — plug Wall Street-grade portfolio analytics, stress-testing, and SEC filing intelligence into any AI assistant. What takes quants & analysts weeks, done in 2 minutes."
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.26.0",
