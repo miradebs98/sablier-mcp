@@ -452,6 +452,13 @@ class SablierClient:
             params["model_id"] = model_id
         return await self._get("/scenarios", params=params)
 
+    # ──────────────────────────────────────────────
+    # Validation
+    # ──────────────────────────────────────────────
+
+    async def get_latest_group_validation(self, model_group_id: str) -> dict:
+        return await self._get(f"/ml/validation/group/{model_group_id}/latest")
+
     async def list_simulation_history(
         self, simulation_batch_id: str
     ) -> dict:
