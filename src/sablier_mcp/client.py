@@ -459,6 +459,46 @@ class SablierClient:
     async def get_latest_group_validation(self, model_group_id: str) -> dict:
         return await self._get(f"/ml/validation/group/{model_group_id}/latest")
 
+    async def trigger_batch_validation(
+        self,
+        model_group_id: str,
+        validation_mode: str = "rolling_huber",
+        n_samples: int = 200,
+        max_starting_points: int = 100,
+    ) -> dict:
+        return await self._post(
+            "/ml/validation/batch",
+            json={
+                "model_group_id": model_group_id,
+                "validation_mode": validation_mode,
+                "n_samples": n_samples,
+                "max_starting_points": max_starting_points,
+            },
+        )
+
+    async def get_batch_validation_status(self, validation_batch_id: str) -> dict:
+        return await self._get(
+            f"/ml/validation/batch/{validation_batch_id}/status"
+        )
+
+    async def get_batch_validation_results(self, validation_batch_id: str) -> dict:
+        return await self._get(
+            f"/ml/validation/batch/{validation_batch_id}/results"
+        )
+
+    async def poll_batch_validation(
+        self, validation_batch_id: str, timeout: float = MAX_POLL_TIME
+    ) -> dict:
+        """Poll batch validation until complete or timeout."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            status = await self.get_batch_validation_status(validation_batch_id)
+            if status.get("all_done") or status.get("status") in ("completed", "failed"):
+                return await self.get_batch_validation_results(validation_batch_id)
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+        return await self.get_batch_validation_results(validation_batch_id)
+
     async def list_simulation_history(
         self, simulation_batch_id: str
     ) -> dict:

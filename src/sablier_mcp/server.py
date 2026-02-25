@@ -546,7 +546,17 @@ async def analyze_qualitative(
             return err
         resolved_tickers = _portfolio_tickers(portfolio)
 
-        weights_dict = portfolio.get("weights", {})
+        # Portfolio stores weights keyed by display name (e.g. "Apple Inc.": 0.2)
+        # but GRAIN backend looks up by ticker (e.g. "AAPL"). Remap using asset_names.
+        raw_weights = portfolio.get("weights", {})
+        asset_names_map = portfolio.get("asset_names", {})  # {display_name: ticker}
+        if raw_weights and asset_names_map:
+            weights_dict = {
+                asset_names_map.get(display, display): w
+                for display, w in raw_weights.items()
+            }
+        else:
+            weights_dict = raw_weights
         p_id = portfolio.get("id")
         p_name = portfolio.get("name")
 
@@ -814,11 +824,48 @@ async def simulate_betas(
 
 
 @server.tool(
+    name="run_model_validation",
+    description=(
+        "Trigger validation for all models in a trained model group. "
+        "Computes per-asset quality metrics: R², autocorrelation, regime sensitivity, pass rate, "
+        "and quality badge (EXCELLENT/GOOD/ACCEPTABLE/POOR). "
+        "Use this after analyze_quantitative to assess model reliability before running scenarios. "
+        "For cached results from a previous run, use get_model_validation instead."
+    ),
+    annotations=ToolAnnotations(openWorldHint=True),
+)
+async def run_model_validation(
+    model_group_id: Annotated[str, Field(description="UUID of the model group (from analyze_quantitative or list_model_groups)")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(model_group_id, "model_group_id"):
+        return err
+    try:
+        client = get_client()
+        batch = await client.trigger_batch_validation(model_group_id)
+
+        validation_batch_id = batch.get("validation_batch_id")
+        if not validation_batch_id:
+            return "Error: validation did not return a validation_batch_id."
+
+        # If Moment models, status is already 'completed' (synchronous)
+        if batch.get("status") == "completed":
+            results = await client.get_batch_validation_results(validation_batch_id)
+        else:
+            results = await client.poll_batch_validation(validation_batch_id)
+
+        return _format_validation_results(model_group_id, results)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
     name="get_model_validation",
     description=(
-        "Get validation metrics for a trained model group. Shows per-asset model quality: "
-        "R² (train/validation), autocorrelation, regime sensitivity, pass rate, and quality badge "
-        "(EXCELLENT/GOOD/ACCEPTABLE/POOR). Use this after analyze_quantitative to assess model reliability."
+        "Get cached validation metrics from the latest validation run for a model group. "
+        "Returns per-asset model quality: R², autocorrelation, regime sensitivity, pass rate, "
+        "and quality badge. To trigger a fresh validation, use run_model_validation instead."
     ),
     annotations=ToolAnnotations(readOnlyHint=True),
 )
@@ -832,29 +879,32 @@ async def get_model_validation(
     try:
         client = get_client()
         result = await client.get_latest_group_validation(model_group_id)
-
-        per_asset = result.get("per_asset", [])
-        formatted = []
-        for asset in per_asset:
-            entry = {
-                "asset": asset.get("asset_id") or asset.get("model_name"),
-                "quality": asset.get("quality"),
-                "pass_rate": asset.get("pass_rate"),
-                "n_passed": asset.get("n_passed"),
-                "n_tests": asset.get("n_tests"),
-                "r_squared": asset.get("r_squared"),
-                "r_squared_train": asset.get("r_squared_train"),
-                "autocorrelation": asset.get("autocorrelation"),
-                "regime_sensitivity": asset.get("regime_sensitivity"),
-            }
-            formatted.append(entry)
-
-        return _fmt({
-            "model_group_id": model_group_id,
-            "assets": formatted,
-        })
+        return _format_validation_results(model_group_id, result)
     except SablierAPIError as e:
         return _api_error(e)
+
+
+def _format_validation_results(model_group_id: str, result: dict) -> str:
+    per_asset = result.get("per_asset", [])
+    formatted = []
+    for asset in per_asset:
+        entry = {
+            "asset": asset.get("asset_id") or asset.get("model_name"),
+            "quality": asset.get("quality"),
+            "pass_rate": asset.get("pass_rate"),
+            "n_passed": asset.get("n_passed"),
+            "n_tests": asset.get("n_tests"),
+            "r_squared": asset.get("r_squared"),
+            "r_squared_train": asset.get("r_squared_train"),
+            "autocorrelation": asset.get("autocorrelation"),
+            "regime_sensitivity": asset.get("regime_sensitivity"),
+        }
+        formatted.append(entry)
+
+    return _fmt({
+        "model_group_id": model_group_id,
+        "assets": formatted,
+    })
 
 
 # ══════════════════════════════════════════════════
@@ -1121,7 +1171,7 @@ async def analyze_quantitative(
             "next_steps": (
                 "Use simulate_returns with factor values (from factor_means_raw) to run scenarios "
                 "and get per-asset risk metrics (VaR, ES, volatility). "
-                "Use get_model_validation to check model quality."
+                "Use run_model_validation to validate model quality."
             ),
         }
 
