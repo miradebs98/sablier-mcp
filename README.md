@@ -1,5 +1,9 @@
 # Sablier MCP Server
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
+[![MCP 1.26+](https://img.shields.io/badge/MCP-1.26+-green.svg)](https://modelcontextprotocol.io)
+
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that lets AI assistants analyze portfolios, stress-test scenarios, and scan SEC filings — in under 2 minutes.
 
 ## What This Does

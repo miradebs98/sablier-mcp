@@ -3,11 +3,19 @@ name = "sablier-mcp"
 version = "0.1.0"
 description = "Sablier MCP — plug Wall Street-grade portfolio analytics, stress-testing, and SEC filing intelligence into any AI assistant. What takes quants & analysts weeks, done in 2 minutes."
 requires-python = ">=3.11"
+license = {text = "MIT"}
+readme = "README.md"
+keywords = ["mcp", "finance", "portfolio", "SEC", "stress-testing", "factor-model", "AI", "risk"]
 dependencies = [
     "mcp>=1.26.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://sablier-ai.com"
+Repository = "https://github.com/miradebs98/sablier-mcp"
+Issues = "https://github.com/miradebs98/sablier-mcp/issues"
 
 [build-system]
 requires = ["hatchling"]
