@@ -436,6 +436,14 @@ class SablierClient:
         )
 
     # ──────────────────────────────────────────────
+    # Market Radar
+    # ──────────────────────────────────────────────
+
+    async def get_market_radar(self) -> dict:
+        """Get comprehensive market radar snapshot with 50+ indicators and regime signals."""
+        return await self._get("/market/radar")
+
+    # ──────────────────────────────────────────────
     # Tests
     # ──────────────────────────────────────────────
 

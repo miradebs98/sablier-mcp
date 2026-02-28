@@ -1149,6 +1149,111 @@ async def analyze_quantitative(
 # NOTE: sablier_full_analysis was removed — LLM can call analyze_quantitative + analyze_qualitative separately.
 
 
+# ══════════════════════════════════════════════════
+# Market Radar
+# ══════════════════════════════════════════════════
+
+
+@server.tool(
+    name="market_radar",
+    description=(
+        "Get a Bloomberg-terminal-grade market briefing with 50+ indicators and computed regime signals. "
+        "Returns current levels, 1-day/1-week/1-month changes, z-scores, and percentiles for equities, "
+        "rates, credit, FX, commodities, volatility, international markets, and crypto. "
+        "Also computes cross-asset signals: Risk-On/Risk-Off score, yield curve regime, credit stress, "
+        "volatility regime, sector rotation, copper/gold ratio, stock-bond correlation, and inflation momentum. "
+        "Flags significant moves (|z-score| > 2) as content opportunities. "
+        "Use this to understand the current market environment and decide what Sablier analyses to run."
+    ),
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+)
+async def market_radar() -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        data = await client.get_market_radar()
+
+        # Build a concise summary for the LLM
+        regime = data.get("regime_summary", {})
+        sig_moves = data.get("significant_moves", [])
+        sectors = data.get("sector_performance", {})
+
+        summary_parts = []
+
+        # Regime overview
+        roro = regime.get("roro_score", {})
+        summary_parts.append(f"REGIME: {roro.get('label', 'Unknown')} (RORO score: {roro.get('score', 'N/A')})")
+
+        curve = regime.get("yield_curve", {})
+        summary_parts.append(f"YIELD CURVE: {curve.get('label', 'Unknown')} (10Y-2Y: {curve.get('spread_10y2y', 'N/A')}%)")
+
+        credit = regime.get("credit_stress", {})
+        summary_parts.append(f"CREDIT: {credit.get('label', 'Unknown')} (HY OAS: {credit.get('hy_oas', 'N/A')}bp)")
+
+        vol = regime.get("vol_regime", {})
+        summary_parts.append(f"VOLATILITY: {vol.get('label', 'Unknown')} (VIX: {vol.get('vix', 'N/A')})")
+
+        rotation = regime.get("sector_rotation", {})
+        summary_parts.append(f"SECTORS: {rotation.get('label', 'Unknown')} — {rotation.get('breadth', 'N/A')}")
+
+        cg = regime.get("copper_gold_trend", {})
+        summary_parts.append(f"COPPER/GOLD: {cg.get('label', 'Unknown')}")
+
+        sb = regime.get("stock_bond_correlation", {})
+        summary_parts.append(f"STOCK-BOND CORR: {sb.get('label', 'Unknown')} ({sb.get('correlation', 'N/A')})")
+
+        infl = regime.get("inflation_momentum", {})
+        summary_parts.append(f"INFLATION EXPECTATIONS: {infl.get('label', 'Unknown')}")
+
+        summary_parts.append("")
+
+        # Significant moves
+        if sig_moves:
+            summary_parts.append(f"SIGNIFICANT MOVES ({len(sig_moves)}):")
+            for m in sig_moves[:10]:
+                direction = "↑" if m.get("change_1w_pct", 0) and m["change_1w_pct"] > 0 else "↓"
+                summary_parts.append(
+                    f"  {direction} {m['name']} ({m['ticker']}): "
+                    f"z={m['z_score']:.1f}, 1w: {m.get('change_1w_pct', 'N/A')}%, "
+                    f"current: {m['current']} [{m['level'].upper()}]"
+                )
+        else:
+            summary_parts.append("NO SIGNIFICANT MOVES (quiet market)")
+
+        summary_parts.append("")
+
+        # Sector performance
+        leaders = sectors.get("leaders", [])
+        laggards = sectors.get("laggards", [])
+        if leaders:
+            summary_parts.append("SECTOR LEADERS (5d): " + ", ".join(
+                f"{s['name']} ({s['return_5d']:+.1f}%)" for s in leaders
+            ))
+        if laggards:
+            summary_parts.append("SECTOR LAGGARDS (5d): " + ", ".join(
+                f"{s['name']} ({s['return_5d']:+.1f}%)" for s in laggards
+            ))
+
+        summary_text = "\n".join(summary_parts)
+
+        # Also include the full data for detailed analysis
+        full_output = {
+            "summary": summary_text,
+            "regime_summary": regime,
+            "significant_moves": sig_moves,
+            "sector_performance": sectors,
+            "indicators_count": data.get("indicators_count", 0),
+            "as_of_date": data.get("as_of_date"),
+            "all_indicators": data.get("indicators", []),
+        }
+
+        return _fmt(full_output)
+    except SablierAPIError as e:
+        return _api_error(e)
+    except Exception as e:
+        logger.error("market_radar failed: %s", e, exc_info=True)
+        return f"Market radar failed: {e}"
 
 
 async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
