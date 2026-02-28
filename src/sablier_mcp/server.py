@@ -883,9 +883,8 @@ def _format_validation_results(model_group_id: str, result: dict) -> str:
             "n_passed": asset.get("n_passed"),
             "n_tests": asset.get("n_tests"),
             "r_squared": asset.get("r_squared"),
-            "r_squared_train": asset.get("r_squared_train"),
+            "r_squared_p10": asset.get("r_squared_p10"),
             "autocorrelation": asset.get("autocorrelation"),
-            "regime_sensitivity": asset.get("regime_sensitivity"),
         }
         formatted.append(entry)
 
