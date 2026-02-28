@@ -23,13 +23,18 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/sablier-mcp"
 PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)' 2>/dev/null || echo '215397666394')
 SERVICE_URL="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
 
-# Staging points at the staging backend API
-STAGING_API_URL="https://sablier-api-staging-${PROJECT_NUMBER}.${REGION}.run.app/api/v1"
+# Staging MCP points at production backend (real data for testing new tools).
+# Override with --staging-backend to use the staging backend instead.
+BACKEND_API_URL="https://sablier-api-${PROJECT_NUMBER}.${REGION}.run.app/api/v1"
 
 REBUILD=false
 for arg in "$@"; do
     case $arg in
         --rebuild) REBUILD=true ;;
+        --staging-backend)
+            BACKEND_API_URL="https://sablier-api-staging-${PROJECT_NUMBER}.${REGION}.run.app/api/v1"
+            echo "Using STAGING backend API"
+            ;;
     esac
 done
 
@@ -48,7 +53,7 @@ fi
 echo "Deploying to Cloud Run..."
 echo "  Service: ${SERVICE_NAME} (STAGING)"
 echo "  URL: ${SERVICE_URL}"
-echo "  Backend API: ${STAGING_API_URL}"
+echo "  Backend API: ${BACKEND_API_URL}"
 
 gcloud run deploy ${SERVICE_NAME} \
     --image ${IMAGE_NAME}:latest \
@@ -62,7 +67,7 @@ gcloud run deploy ${SERVICE_NAME} \
     --max-instances 2 \
     --min-instances 0 \
     --concurrency 40 \
-    --set-env-vars "MCP_TRANSPORT=streamable-http,MCP_ISSUER_URL=${SERVICE_URL},SABLIER_API_URL=${STAGING_API_URL}" \
+    --set-env-vars "MCP_TRANSPORT=streamable-http,MCP_ISSUER_URL=${SERVICE_URL},SABLIER_API_URL=${BACKEND_API_URL}" \
     --set-secrets 'MCP_TOKEN_SECRET=mcp-token-secret:latest' \
     --quiet
 
@@ -72,7 +77,7 @@ if [ -n "$DEPLOYED_URL" ]; then
     echo "STAGING deployed! ${DEPLOYED_URL}/mcp/"
     echo ""
     echo "Staging Configuration:"
-    echo "  - Backend: ${STAGING_API_URL}"
+    echo "  - Backend: ${BACKEND_API_URL}"
     echo "  - Auto-scaling: 0-2 instances"
     echo "  - Same token secret as production (shared logins)"
     echo ""
