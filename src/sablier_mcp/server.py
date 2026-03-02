@@ -902,11 +902,12 @@ def _format_validation_results(model_group_id: str, result: dict) -> str:
 @server.tool(
     name="simulate_returns",
     description=(
-        "Simulate return distributions under a what-if scenario. "
+        "Run a what-if scenario — this is the PRIMARY tool for stress-testing a portfolio. "
         "Requires simulation_batch_id from analyze_quantitative or simulate_betas. "
-        "IMPORTANT: factor values must be absolute price levels (use factor_means_raw as baseline). "
-        "Example: to shock US Market -5% from 682.39, pass {'US Market': 648.27}. "
-        "Returns per-asset expected returns and risk metrics (VaR, ES, volatility)."
+        "Pass ALL conditioning_features as absolute price levels in the factors dict. "
+        "Use factor_means_raw from the betas output as current baseline, then compute targets "
+        "(e.g. to shock SPY -5% from 633: pass {'US Market': 601.35}). "
+        "Returns per-asset expected returns, VaR, Expected Shortfall, and return distribution."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
 )
@@ -976,7 +977,13 @@ async def simulate_returns(
 
 @server.tool(
     name="create_scenario",
-    description="Save a named what-if scenario for reuse. Factor spec types: 'fixed' (exact value), 'percentile' (historical), 'shock' (std dev shift).",
+    description=(
+        "Save a named scenario template to the database for later reuse. "
+        "This does NOT run a simulation — use simulate_returns to actually run what-if scenarios. "
+        "Requires model_id (an individual model UUID, NOT model_group_id). "
+        "Factor spec format: {'VIX': {'type': 'fixed', 'value': 35}}. "
+        "Supported types: 'fixed' (exact value), 'percentile' (historical percentile), 'shock' (std dev shift)."
+    ),
 )
 async def create_scenario(
     model_id: Annotated[str, Field(description="UUID of the model this scenario applies to")],
@@ -1008,7 +1015,10 @@ async def create_scenario(
 
 @server.tool(
     name="list_scenarios",
-    description="List saved scenarios. Optionally filter by model_id from list_model_groups.",
+    description=(
+        "List saved scenario templates. These are stored factor specs — "
+        "to actually run a scenario, use simulate_returns with the factor values."
+    ),
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def list_scenarios(
@@ -1131,9 +1141,11 @@ async def analyze_quantitative(
             "models_created": total_created,
             **flat,
             "next_steps": (
-                "Use simulate_returns with factor values (from factor_means_raw) to run scenarios "
-                "and get per-asset risk metrics (VaR, ES, volatility). "
-                "Use run_model_validation to validate model quality."
+                "To run a what-if scenario, call simulate_returns with simulation_batch_id "
+                f"and a factors dict containing ALL of these at your desired levels: "
+                f"{', '.join(flat.get('conditioning_features', []))}. "
+                "Use factor_means_raw above as current baseline values. "
+                "To save a scenario template for later, use create_scenario."
             ),
         }
 
