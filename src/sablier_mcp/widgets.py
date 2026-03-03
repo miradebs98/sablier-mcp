@@ -502,18 +502,21 @@ def flow_fan_chart(
     Only displays target assets (not conditioning factors). Returns None if
     no target features have timeseries data.
     """
-    # Filter to target assets with timeseries data
-    panels: list[tuple[str, dict]] = []
+    # Collect features with timeseries data, preferring target assets
+    all_with_ts: list[tuple[str, dict]] = []
+    targets_only: list[tuple[str, dict]] = []
     for name, data in summary.items():
         if not isinstance(data, dict):
-            continue
-        if data.get('feature_type') != 'target':
             continue
         ts = data.get('timeseries')
         if not ts or 'p50' not in ts:
             continue
-        panels.append((name, data))
+        all_with_ts.append((name, data))
+        if data.get('feature_type') == 'target':
+            targets_only.append((name, data))
 
+    # Prefer target assets; fall back to all features if none marked as target
+    panels = targets_only if targets_only else all_with_ts
     if not panels:
         return None
 

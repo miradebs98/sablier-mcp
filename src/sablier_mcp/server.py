@@ -1695,9 +1695,12 @@ async def get_flow_job_status(
                         result.get("constraints"),
                     )
                     if chart_html:
+                        logger.info(f"Fan chart generated ({len(chart_html)} chars), returning with widget")
                         return _with_widget(_fmt(result), chart_html)
+                    else:
+                        logger.info("Fan chart returned None — no target features with timeseries")
                 except Exception:
-                    logger.debug("Fan chart generation failed, returning text-only", exc_info=True)
+                    logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
             return _fmt(result)
     except SablierAPIError as e:
         return _api_error(e)
