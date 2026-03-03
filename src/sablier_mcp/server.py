@@ -1512,7 +1512,8 @@ async def analyze_quantitative(
         "Train an OT-CFM flow model for generative time series simulation. "
         "This learns the joint distribution of assets + factors and can generate realistic multi-step paths. "
         "Requires a model_group_id with trained Moment models. "
-        "This is an async GPU job — the tool will poll until completion."
+        "This is an async GPU job — the tool will poll for up to 20 minutes. "
+        "If training takes longer, use get_flow_job_status to check progress."
     ),
 )
 async def flow_train(
@@ -1545,7 +1546,7 @@ async def flow_train(
             return _fmt({
                 "status": result.get("status"),
                 "job_id": job_id,
-                "message": "Training is still running. Check back shortly.",
+                "message": "Training is still running. Use get_flow_job_status with this job_id to check progress.",
             })
 
         return _fmt({
@@ -1643,6 +1644,36 @@ async def flow_generate_constrained_paths(
         if result.get("status") == "failed":
             return f"Constrained path generation failed: {result.get('error', 'Unknown error')}"
 
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="get_flow_job_status",
+    description=(
+        "Check the status of a Flow job (training or generation). "
+        "Use this after flow_train, flow_generate_paths, or flow_generate_constrained_paths "
+        "if they timed out before completion. Returns current status and progress info."
+    ),
+)
+async def get_flow_job_status(
+    job_id: Annotated[str, Field(description="The job UUID returned by flow_train or flow_generate_paths")],
+    job_type: Annotated[str, Field(
+        description="Type of job: 'train' or 'generate'. Determines which status endpoint to query.",
+        default="train",
+    )] = "train",
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(job_id, "job_id"):
+        return err
+    try:
+        client = get_client()
+        if job_type == "train":
+            result = await client.flow_train_status(job_id)
+        else:
+            result = await client.flow_get_results(job_id)
         return _fmt(result)
     except SablierAPIError as e:
         return _api_error(e)

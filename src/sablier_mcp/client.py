@@ -14,7 +14,8 @@ DEFAULT_BASE_URL = "https://sablier-api-215397666394.us-central1.run.app/api/v1"
 DEFAULT_TIMEOUT = 60.0
 LONG_TIMEOUT = 300.0  # 5 minutes — for synchronous training/simulation
 POLL_INTERVAL = 3.0
-MAX_POLL_TIME = 300.0  # 5 minutes
+MAX_POLL_TIME = 300.0  # 5 minutes — for generation jobs
+TRAIN_POLL_TIME = 1200.0  # 20 minutes — training takes longer
 
 
 class SablierAPIError(Exception):
@@ -567,7 +568,7 @@ class SablierClient:
         return await self._get(f"/flow/train/{job_id}/status")
 
     async def poll_flow_train(
-        self, job_id: str, timeout: float = MAX_POLL_TIME
+        self, job_id: str, timeout: float = TRAIN_POLL_TIME
     ) -> dict:
         """Poll a flow training job until completion or timeout."""
         elapsed = 0.0
