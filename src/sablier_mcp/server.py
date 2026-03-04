@@ -303,7 +303,7 @@ async def search_features(
         return err
     try:
         client = get_client()
-        results = await client.search_features(query, is_asset=is_asset, limit=limit)
+        results = await client.search_features(query, is_asset=is_asset, limit=limit)  # source filter available via client
         summary = []
         for f in results:
             entry = {
@@ -580,6 +580,9 @@ async def create_portfolio(
         return err
     if len(tickers) != len(weights):
         return "Error: tickers and weights must have the same length"
+    weight_sum = sum(weights)
+    if abs(weight_sum - 1.0) > 0.01:
+        return f"Error: weights must sum to 1.0 (got {weight_sum:.4f})"
 
     try:
         assets = [{"ticker": t, "weight": w} for t, w in zip(tickers, weights)]
@@ -1060,15 +1063,20 @@ async def create_feature_set(
         result = await client.create_feature_set(
             name=name, features=features, description=description, set_type=set_type,
         )
+        set_id = result.get("id")
+        actual_type = result.get("set_type", set_type)
+        id_key = "conditioning_set_id" if actual_type == "conditioning" else "target_set_id"
         return _fmt({
-            "conditioning_set_id": result.get("id"),
+            id_key: set_id,
             "name": result.get("name"),
-            "set_type": result.get("set_type"),
+            "set_type": actual_type,
             "features": [
                 {"display_name": f.get("display_name"), "ticker": f.get("ticker"), "source": f.get("source")}
                 for f in (result.get("features") or [])
             ],
-            "message": f"Feature set '{name}' created. Use the conditioning_set_id with analyze_quantitative.",
+            "message": f"Feature set '{name}' created (ID: {set_id}). "
+                       + (f"Use the {id_key} with analyze_quantitative." if actual_type == "conditioning"
+                          else "Use the target_set_id when creating portfolios."),
         })
     except SablierAPIError as e:
         return _api_error(e)
@@ -2008,7 +2016,7 @@ async def market_radar() -> str:
 
 
 async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
-    """Retry an async API call on transient server errors (5xx).
+    """Retry an async API call on transient server errors (5xx) and rate limits (429).
 
     coro_fn must be a zero-arg callable that returns a coroutine, e.g.:
         await _retry_api_call(lambda: client.train_batch(model_group_id=mgid))
@@ -2019,7 +2027,8 @@ async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
             return await coro_fn()
         except SablierAPIError as e:
             last_exc = e
-            if e.status_code < 500 or attempt == max_retries:
+            retryable = e.status_code >= 500 or e.status_code == 429
+            if not retryable or attempt == max_retries:
                 raise
             logger.warning("Transient %s on attempt %d/%d — retrying in %.0fs", e, attempt + 1, max_retries + 1, delay)
             await asyncio.sleep(delay)
