@@ -669,6 +669,25 @@ class SablierClient:
         return result
 
     # ──────────────────────────────────────────────
+    # User API Keys (third-party: FRED, Finnhub)
+    # ──────────────────────────────────────────────
+
+    async def set_user_api_key(self, provider: str, api_key: str, name: str | None = None) -> dict:
+        """Create or update a user's third-party API key."""
+        body: dict = {"provider": provider, "api_key": api_key}
+        if name:
+            body["name"] = name
+        return await self._post("/user-api-keys", json=body)
+
+    async def list_user_api_keys(self) -> dict:
+        """List the user's stored third-party API keys (no secrets returned)."""
+        return await self._get("/user-api-keys")
+
+    async def delete_user_api_key(self, provider: str) -> dict:
+        """Delete a user's third-party API key by provider."""
+        return await self._delete(f"/user-api-keys/{provider}")
+
+    # ──────────────────────────────────────────────
     # Tests
     # ──────────────────────────────────────────────
 
