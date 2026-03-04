@@ -386,6 +386,36 @@ class SablierClient:
     async def list_feature_set_templates(self) -> list[dict]:
         return await self._get("/feature-sets/templates")
 
+    async def list_all_feature_sets(self, set_type: str | None = None) -> dict:
+        """List all accessible feature sets (user's own + shared templates)."""
+        params: dict[str, Any] = {}
+        if set_type:
+            params["set_type"] = set_type
+        return await self._get("/feature-sets/all", params=params)
+
+    async def create_feature_set(
+        self,
+        name: str,
+        features: list[dict],
+        description: str = "",
+        set_type: str = "conditioning",
+    ) -> dict:
+        """Create a custom feature set (conditioning or target)."""
+        return await self._post("/feature-sets", json={
+            "name": name,
+            "set_type": set_type,
+            "features": features,
+            "description": description,
+        })
+
+    async def get_feature_set(self, feature_set_id: str) -> dict:
+        """Get details of a specific feature set."""
+        return await self._get(f"/feature-sets/{feature_set_id}")
+
+    async def delete_feature_set(self, feature_set_id: str) -> dict:
+        """Delete a feature set."""
+        return await self._delete(f"/feature-sets/{feature_set_id}")
+
     # ──────────────────────────────────────────────
     # Training (Moment — synchronous, returns results directly)
     # ──────────────────────────────────────────────

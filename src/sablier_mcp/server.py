@@ -964,6 +964,115 @@ async def list_feature_set_templates() -> str:
 
 
 @server.tool(
+    name="create_feature_set",
+    description=(
+        "Create a custom conditioning set (or target set) from features in the catalog. "
+        "Use this to build arbitrary factor sets for analyze_quantitative instead of using pre-built templates. "
+        "Each feature needs at minimum a 'ticker' and 'source' ('YAHOO' or 'FRED'). "
+        "The display_name is auto-resolved from available_features if omitted. "
+        "Returns the conditioning_set_id that can be passed to analyze_quantitative."
+    ),
+)
+async def create_feature_set(
+    name: Annotated[str, Field(description="Name for the set (e.g. 'Custom Macro Factors')")],
+    features: Annotated[list[dict], Field(description="List of features. Each needs 'ticker' and 'source' (YAHOO/FRED). Optional: 'display_name'.")],
+    description: Annotated[str, Field(description="Optional description", default="")] = "",
+    set_type: Annotated[str, Field(description="'conditioning' (market drivers) or 'target' (assets to model)", default="conditioning")] = "conditioning",
+) -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        result = await client.create_feature_set(
+            name=name, features=features, description=description, set_type=set_type,
+        )
+        return _fmt({
+            "conditioning_set_id": result.get("id"),
+            "name": result.get("name"),
+            "set_type": result.get("set_type"),
+            "features": [
+                {"display_name": f.get("display_name"), "ticker": f.get("ticker"), "source": f.get("source")}
+                for f in (result.get("features") or [])
+            ],
+            "message": f"Feature set '{name}' created. Use the conditioning_set_id with analyze_quantitative.",
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="list_feature_sets",
+    description=(
+        "List all accessible feature sets: your custom sets plus shared templates. "
+        "Filter by set_type ('conditioning' or 'target'). "
+        "Use this to find conditioning_set_id values for analyze_quantitative."
+    ),
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def list_feature_sets(
+    set_type: Annotated[str | None, Field(description="Filter: 'conditioning' or 'target'. Omit for all.", default=None)] = None,
+) -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        result = await client.list_all_feature_sets(set_type=set_type)
+        sets = result.get("feature_sets", []) if isinstance(result, dict) else result
+        return _fmt([
+            {
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "set_type": s.get("set_type"),
+                "features_count": len(s.get("features") or []),
+                "features": [f.get("display_name") or f.get("ticker") for f in (s.get("features") or [])],
+                "is_template": bool(s.get("tag")),
+            }
+            for s in sets
+        ])
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="get_feature_set",
+    description="Get detailed information about a specific feature set including all features and their configuration.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_feature_set(
+    feature_set_id: Annotated[str, Field(description="UUID of the feature set")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(feature_set_id, "feature_set_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_feature_set(feature_set_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="delete_feature_set",
+    description="Delete a custom feature set. This is permanent and cannot be undone. Cannot delete shared templates.",
+)
+async def delete_feature_set(
+    feature_set_id: Annotated[str, Field(description="UUID of the feature set to delete")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(feature_set_id, "feature_set_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.delete_feature_set(feature_set_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
     name="delete_model_group",
     description="Delete a model group and all its models, simulations, and associated data. This is permanent.",
 )
@@ -1406,12 +1515,12 @@ async def clone_scenario(
     description=(
         "One-shot quantitative analysis: builds factor models, trains, and computes asset sensitivities to "
         "market drivers. Pass either portfolio_id or tickers directly (auto-creates portfolio with equal weights). "
-        "Requires conditioning_set_id from list_feature_set_templates. "
+        "Requires conditioning_set_id from list_feature_set_templates or create_feature_set. "
         "Returns factor exposures, simulation_batch_id for use with simulate_returns."
     ),
 )
 async def analyze_quantitative(
-    conditioning_set_id: Annotated[str, Field(description="UUID of the conditioning set (from list_feature_set_templates)")],
+    conditioning_set_id: Annotated[str, Field(description="UUID of the conditioning set (from list_feature_set_templates or create_feature_set)")],
     portfolio_id: Annotated[str | None, Field(description="UUID of an existing portfolio. If omitted, provide tickers instead.", default=None)] = None,
     tickers: Annotated[list[str] | None, Field(description="Tickers to analyze (e.g. ['AAPL', 'MSFT']). Auto-creates a portfolio if portfolio_id is not given.", default=None)] = None,
     weights: Annotated[list[float] | None, Field(description="Optional weights for tickers (must sum to 1.0). Defaults to equal weights.", default=None)] = None,
