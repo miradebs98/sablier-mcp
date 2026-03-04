@@ -1609,7 +1609,7 @@ async def analyze_quantitative(
     weights: Annotated[list[float] | None, Field(description="Optional weights for tickers (must sum to 1.0). Defaults to equal weights.", default=None)] = None,
     use_baseline: Annotated[bool, Field(description="Include baseline factors (Market, Value, Growth, etc.) to absorb common variance. Default True.", default=True)] = True,
     baseline_set_id: Annotated[str | None, Field(description="UUID of a custom baseline conditioning set. If omitted, uses the System default baseline. Only used when use_baseline=True.", default=None)] = None,
-    nonlinear: Annotated[bool, Field(description="Fit GAM nonlinear sensitivity curves on top of linear betas. Requires Pro+ tier. Default True (runs if tier allows).", default=True)] = True,
+    nonlinear: Annotated[bool, Field(description="Also fit nonlinear factor exposure model on top of linear betas, producing sensitivity curves. Requires Pro+ tier. Default True (runs if tier allows).", default=True)] = True,
 ) -> list | str:
     if err := _require_auth():
         return err
