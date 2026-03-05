@@ -1927,18 +1927,62 @@ async def flow_generate_constrained_paths(
 
 
 @server.tool(
+    name="flow_validate",
+    description=(
+        "Validate a trained Flow model against real data. "
+        "Generates paths and compares them to historical distributions using "
+        "Wasserstein distance, KS tests, coverage tests, and marginal distribution checks. "
+        "Returns a quality badge (EXCELLENT/GOOD/ACCEPTABLE/POOR) and per-feature metrics. "
+        "Requires a trained Flow model (run flow_train first). "
+        "This is an async GPU job — use get_flow_job_status with job_type='validate' to check progress."
+    ),
+)
+async def flow_validate(
+    model_group_id: Annotated[str, Field(description="UUID of the model group with a trained Flow model")],
+    n_paths: Annotated[int, Field(description="Number of paths to generate for validation (default 500)", default=500)] = 500,
+    horizon: Annotated[int | None, Field(description="Validation horizon (defaults to training horizon)", default=None)] = None,
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(model_group_id, "model_group_id"):
+        return err
+    try:
+        client = get_client()
+        job = await client.flow_validate(
+            model_group_id=model_group_id,
+            n_paths=n_paths,
+            horizon=horizon,
+        )
+        job_id = job.get("job_id")
+        if not job_id:
+            return "Error: Flow validation did not return a job_id."
+
+        return _fmt({
+            "status": "submitted",
+            "job_id": job_id,
+            "model_group_id": model_group_id,
+            "message": (
+                "Flow validation job submitted. Typically takes 2-5 minutes. "
+                "Use get_flow_job_status with job_type='validate' to check progress and get results."
+            ),
+        })
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
     name="get_flow_job_status",
     description=(
-        "Check the status of a Flow job (training or generation). "
-        "Use this after flow_train, flow_generate_paths, or flow_generate_constrained_paths "
-        "to check progress and retrieve results when complete. "
+        "Check the status of a Flow job (training, generation, or validation). "
+        "Use this after flow_train, flow_generate_paths, flow_generate_constrained_paths, "
+        "or flow_validate to check progress and retrieve results when complete. "
         "Training typically takes 5-15 minutes; generation takes 1-5 minutes."
     ),
 )
 async def get_flow_job_status(
-    job_id: Annotated[str, Field(description="The job UUID returned by flow_train or flow_generate_paths")],
+    job_id: Annotated[str, Field(description="The job UUID returned by flow_train, flow_generate_paths, or flow_validate")],
     job_type: Annotated[str, Field(
-        description="Type of job: 'train' or 'generate'. Determines which status endpoint to query.",
+        description="Type of job: 'train', 'generate', or 'validate'. Determines which status endpoint to query.",
         default="train",
     )] = "train",
 ) -> str | list:
@@ -1950,6 +1994,9 @@ async def get_flow_job_status(
         client = get_client()
         if job_type == "train":
             result = await client.flow_train_status(job_id)
+            return _fmt(result)
+        elif job_type == "validate":
+            result = await client.flow_validate_results(job_id)
             return _fmt(result)
         else:
             result = await client.flow_get_results(job_id)

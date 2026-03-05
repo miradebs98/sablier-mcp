@@ -663,6 +663,26 @@ class SablierClient:
     async def flow_get_results(self, job_id: str) -> dict:
         return await self._get(f"/flow/{job_id}/results")
 
+    async def flow_validate(
+        self,
+        model_group_id: str,
+        n_paths: int = 500,
+        horizon: int | None = None,
+    ) -> dict:
+        body: dict = {
+            "model_group_id": model_group_id,
+            "n_paths": n_paths,
+        }
+        if horizon is not None:
+            body["horizon"] = horizon
+        return await self._post("/flow/validate", json=body)
+
+    async def flow_validate_status(self, job_id: str) -> dict:
+        return await self._get(f"/flow/validate/{job_id}/status")
+
+    async def flow_validate_results(self, job_id: str) -> dict:
+        return await self._get(f"/flow/validate/{job_id}/results")
+
     async def poll_flow_job(
         self, job_id: str, status_path: str, timeout: float = MAX_POLL_TIME
     ) -> dict:
