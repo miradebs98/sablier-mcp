@@ -212,7 +212,7 @@ def _flatten_betas(results: dict) -> dict:
     factor_stds_raw = dict(zip(factor_names, stds_raw_list)) if stds_raw_list else {}
     factor_last_values_raw = dict(zip(factor_names, last_values_list)) if last_values_list else {}
 
-    return {
+    out = {
         "conditioning_features": features,
         "assets": assets,
         "factor_last_values_raw": factor_last_values_raw,
@@ -222,6 +222,9 @@ def _flatten_betas(results: dict) -> dict:
         "factor_stds": factor_stds,
         "factor_last_date": factor_stats.get("factor_last_date"),
     }
+    if results.get("collinear_groups"):
+        out["collinear_groups"] = results["collinear_groups"]
+    return out
 
 
 async def _ensure_portfolio(
@@ -1951,7 +1954,7 @@ async def get_flow_job_status(
         else:
             result = await client.flow_get_results(job_id)
             # Try to generate fan chart widget for completed generation results
-            summary = result.get("summary", {})
+            summary = result.get("summary") or {}
             has_ts = any(
                 isinstance(v, dict) and "timeseries" in v
                 for v in summary.values()
