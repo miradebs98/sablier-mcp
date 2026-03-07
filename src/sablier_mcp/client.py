@@ -746,6 +746,59 @@ class SablierClient:
         return await self._delete(f"/user-api-keys/{provider}")
 
     # ──────────────────────────────────────────────
+    # Strategies (backtest + forward-test)
+    # ──────────────────────────────────────────────
+
+    async def create_strategy(self, portfolio_id: str, name: str,
+                              rules: list | None = None, **kwargs) -> dict:
+        payload = {"portfolio_id": portfolio_id, "name": name, "rules": rules or []}
+        payload.update(kwargs)
+        return await self._post("/strategies", json=payload)
+
+    async def list_strategies(self, portfolio_id: str | None = None,
+                              limit: int = 50) -> dict:
+        params = {"limit": limit}
+        if portfolio_id:
+            params["portfolio_id"] = portfolio_id
+        return await self._get("/strategies", params=params)
+
+    async def get_strategy(self, strategy_id: str) -> dict:
+        return await self._get(f"/strategies/{strategy_id}")
+
+    async def update_strategy(self, strategy_id: str, **kwargs) -> dict:
+        return await self._request("PATCH", f"/strategies/{strategy_id}", json=kwargs)
+
+    async def delete_strategy(self, strategy_id: str) -> dict:
+        return await self._delete(f"/strategies/{strategy_id}")
+
+    async def run_backtest(self, strategy_id: str,
+                           start_date: str, end_date: str) -> dict:
+        return await self._post_long(
+            f"/strategies/{strategy_id}/backtest",
+            json={"start_date": start_date, "end_date": end_date},
+        )
+
+    async def run_forward_test(self, strategy_id: str,
+                               model_group_id: str,
+                               generation_job_id: str) -> dict:
+        return await self._post_long(
+            f"/strategies/{strategy_id}/forward-test",
+            json={
+                "model_group_id": model_group_id,
+                "generation_job_id": generation_job_id,
+            },
+        )
+
+    async def get_strategy_run(self, run_id: str) -> dict:
+        return await self._get(f"/strategies/runs/{run_id}")
+
+    async def list_strategy_runs(self, strategy_id: str,
+                                 limit: int = 50) -> dict:
+        return await self._get(
+            f"/strategies/{strategy_id}/runs", params={"limit": limit},
+        )
+
+    # ──────────────────────────────────────────────
     # Tests
     # ──────────────────────────────────────────────
 

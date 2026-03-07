@@ -2132,6 +2132,247 @@ async def market_radar() -> str:
         return f"Market radar failed: {e}"
 
 
+# ══════════════════════════════════════════════════
+# Strategy Engine (Backtest + Forward-test)
+# ══════════════════════════════════════════════════
+
+
+@server.tool(
+    name="create_strategy",
+    description=(
+        "Create a trading strategy with indicator-based rules for a portfolio. "
+        "Rules define when to buy/sell assets based on technical indicators (RSI, SMA crossovers, MACD, etc.). "
+        "A strategy with no rules is a static buy-and-hold portfolio. "
+        "Each rule has: conditions (indicator + operator + threshold), signal (BUY/SELL), and position sizing."
+    ),
+)
+async def create_strategy(
+    portfolio_id: Annotated[str, Field(description="Portfolio UUID")],
+    name: Annotated[str, Field(description="Strategy name")],
+    rules: Annotated[list[dict] | None, Field(
+        description=(
+            "Trading rules. Each rule: {"
+            "'id': 'rule-1', 'asset': 'AAPL', "
+            "'conditions': [{'feature': 'AAPL', 'indicator': 'rsi', 'params': {'period': 14}, 'operator': '>', 'threshold': 70}], "
+            "'signal': 'SELL', 'size_type': 'all', 'size_value': 1.0"
+            "}. Operators: >, <, >=, <=, cross_above, cross_below. "
+            "Indicators: rsi, moving_average, ema, macd_line, macd_signal, macd_histogram, "
+            "bollinger_upper/lower/width, rate_of_change, rolling_std, rolling_volatility, "
+            "z_score, level (raw price). "
+            "size_type: pct_of_capital, pct_of_position, all."
+        ),
+        default=None,
+    )] = None,
+    description: Annotated[str | None, Field(description="Optional description", default="")] = "",
+    transaction_cost_bps: Annotated[float | None, Field(description="Transaction cost in basis points (default 10)", default=10)] = 10,
+    slippage_bps: Annotated[float | None, Field(description="Slippage in basis points (default 5)", default=5)] = 5,
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(portfolio_id, "portfolio_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.create_strategy(
+            portfolio_id=portfolio_id,
+            name=name,
+            rules=rules or [],
+            description=description or "",
+            transaction_cost_bps=transaction_cost_bps or 10,
+            slippage_bps=slippage_bps or 5,
+        )
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="list_strategies",
+    description="List the user's trading strategies. Optionally filter by portfolio.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def list_strategies(
+    portfolio_id: Annotated[str | None, Field(description="Optional portfolio UUID to filter by", default=None)] = None,
+) -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        result = await client.list_strategies(portfolio_id=portfolio_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="get_strategy",
+    description="Get detailed information about a strategy including its trading rules.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_strategy(
+    strategy_id: Annotated[str, Field(description="Strategy UUID")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_strategy(strategy_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="update_strategy",
+    description="Update a strategy's rules, name, description, or execution parameters (transaction costs, slippage).",
+)
+async def update_strategy(
+    strategy_id: Annotated[str, Field(description="Strategy UUID")],
+    name: Annotated[str | None, Field(description="New name", default=None)] = None,
+    description: Annotated[str | None, Field(description="New description", default=None)] = None,
+    rules: Annotated[list[dict] | None, Field(description="New trading rules (replaces existing)", default=None)] = None,
+    transaction_cost_bps: Annotated[float | None, Field(description="New transaction cost in bps", default=None)] = None,
+    slippage_bps: Annotated[float | None, Field(description="New slippage in bps", default=None)] = None,
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    try:
+        client = get_client()
+        kwargs = {}
+        if name is not None:
+            kwargs["name"] = name
+        if description is not None:
+            kwargs["description"] = description
+        if rules is not None:
+            kwargs["rules"] = rules
+        if transaction_cost_bps is not None:
+            kwargs["transaction_cost_bps"] = transaction_cost_bps
+        if slippage_bps is not None:
+            kwargs["slippage_bps"] = slippage_bps
+        result = await client.update_strategy(strategy_id, **kwargs)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="delete_strategy",
+    description="Delete a strategy and all its backtest/forward-test runs. This is permanent.",
+)
+async def delete_strategy(
+    strategy_id: Annotated[str, Field(description="Strategy UUID to delete")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.delete_strategy(strategy_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="run_backtest",
+    description=(
+        "Backtest a strategy over historical data. Runs the trading rules over real price history "
+        "and returns an equity curve, trade log, and performance metrics (Sharpe, Sortino, max drawdown, "
+        "win rate, profit factor). For a strategy with no rules, this is a buy-and-hold backtest."
+    ),
+)
+async def run_backtest(
+    strategy_id: Annotated[str, Field(description="Strategy UUID")],
+    start_date: Annotated[str, Field(description="Start date YYYY-MM-DD (e.g. '2023-01-01')")],
+    end_date: Annotated[str, Field(description="End date YYYY-MM-DD (e.g. '2025-01-01')")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.run_backtest(strategy_id, start_date, end_date)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="run_forward_test",
+    description=(
+        "Forward-test a strategy over synthetic flow paths. Runs trading rules over N flow-generated "
+        "price paths and returns a distribution of outcomes (Sharpe, drawdown, return distributions across paths). "
+        "This tests strategy robustness — a strategy that works on 950/1000 paths is robust, one that works "
+        "on 200/1000 is likely overfit. Requires a trained flow model with generated paths."
+    ),
+)
+async def run_forward_test(
+    strategy_id: Annotated[str, Field(description="Strategy UUID")],
+    model_group_id: Annotated[str, Field(description="Flow model group UUID")],
+    generation_job_id: Annotated[str, Field(description="Flow generation job UUID (from flow_generate_paths)")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    if err := _validate_uuid(model_group_id, "model_group_id"):
+        return err
+    if err := _validate_uuid(generation_job_id, "generation_job_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.run_forward_test(strategy_id, model_group_id, generation_job_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="get_strategy_run",
+    description="Get the results of a backtest or forward-test run.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_strategy_run(
+    run_id: Annotated[str, Field(description="Run UUID")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(run_id, "run_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.get_strategy_run(run_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="list_strategy_runs",
+    description="List past backtest and forward-test runs for a strategy.",
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def list_strategy_runs(
+    strategy_id: Annotated[str, Field(description="Strategy UUID")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(strategy_id, "strategy_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.list_strategy_runs(strategy_id)
+        return _fmt(result)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
 async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
     """Retry an async API call on transient server errors (5xx) and rate limits (429).
 
