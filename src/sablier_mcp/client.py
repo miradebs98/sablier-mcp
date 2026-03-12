@@ -726,6 +726,21 @@ class SablierClient:
             elapsed += POLL_INTERVAL
         return result
 
+    async def flow_get_latest_results(self, model_group_id: str) -> dict:
+        """Get latest completed baseline generation results for a flow model group."""
+        return await self._get(f"/flow/model-group/{model_group_id}/latest-results")
+
+    async def flow_list_scenarios(self, model_group_id: str) -> dict:
+        """List completed constrained scenarios for a flow model group."""
+        return await self._get(f"/flow/model-group/{model_group_id}/scenarios")
+
+    async def flow_portfolio_test(self, portfolio_id: str, flow_job_id: str) -> dict:
+        """Run portfolio risk analytics on flow-generated paths."""
+        return await self._post(
+            "/flow/portfolio-test",
+            json={"portfolio_id": portfolio_id, "flow_job_id": flow_job_id},
+        )
+
     # ──────────────────────────────────────────────
     # User API Keys (third-party: FRED, Finnhub)
     # ──────────────────────────────────────────────

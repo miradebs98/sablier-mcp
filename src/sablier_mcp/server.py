@@ -32,6 +32,7 @@ from sablier_mcp.client import SablierClient, SablierAPIError
 from sablier_mcp.widgets import (
     betas_heatmap,
     flow_fan_chart,
+    flow_risk_card,
     grain_score_card,
     portfolio_overview,
 )
@@ -1664,8 +1665,8 @@ async def run_scenario(
                 "status": status,
                 "job_id": result.get("job_id"),
                 "message": (
-                    "Flow scenario job submitted. Use get_flow_job_status with "
-                    "job_type='generate' to check progress and get results."
+                    "Flow scenario job submitted. The job is running asynchronously. "
+                    "Use simulate_flow_scenario for new constrained scenarios instead."
                 ),
             })
         else:
@@ -1799,150 +1800,399 @@ async def analyze_quantitative(
 
 
 @server.tool(
-    name="flow_train",
+    name="generate_synthetic",
     description=(
-        "Train an OT-CFM flow model for generative time series simulation. "
-        "This learns the joint distribution of assets + factors and can generate realistic multi-step paths. "
-        "Requires a model_group_id with trained Moment models. "
-        "This is an async GPU job — the tool will poll until completion."
+        "One-shot generative analysis: builds factor models, trains a flow model, and generates "
+        "realistic multi-step joint trajectories for portfolio assets and market drivers. "
+        "Pass either portfolio_id or tickers directly (auto-creates portfolio with equal weights). "
+        "Requires conditioning_set_id from list_feature_set_templates — ask the user what market "
+        "drivers they want to include. "
+        "IMPORTANT — before calling, ask the user about these parameters and explain them: "
+        "horizon = forecast horizon in trading days (~1 month = 20, ~1 quarter = 60, ~6 months = 120); "
+        "n_paths = number of simulated trajectories (500 is a good default, 1000+ for high-confidence analysis). "
+        "Use horizon=20 and n_paths=500 if the user has no preference. Choose longer horizons for strategic/long-term "
+        "analysis and shorter for tactical/near-term views. "
+        "Returns per-asset path distributions, feature_names for building constraints, and IDs for follow-up tools "
+        "(simulate_flow_scenario for what-if scenarios, test_flow_risk for portfolio risk metrics). "
+        "Training typically takes 5-15 min; path generation takes 1-3 min."
     ),
 )
-async def flow_train(
-    model_group_id: Annotated[str, Field(description="UUID of the model group (must have trained Moment models)")],
-    horizon: Annotated[int, Field(description="Number of future time steps to generate (default 20)", default=20)] = 20,
-    obs_length: Annotated[int, Field(description="Context window length for conditioning (default 60)", default=60)] = 60,
-    max_epochs: Annotated[int, Field(description="Maximum training epochs (default 500)", default=500)] = 500,
-) -> str:
+async def generate_synthetic(
+    conditioning_set_id: Annotated[str, Field(
+        description="UUID of the conditioning set (from list_feature_set_templates or create_feature_set)"
+    )],
+    portfolio_id: Annotated[str | None, Field(
+        description="UUID of an existing portfolio. If omitted, provide tickers instead.",
+        default=None,
+    )] = None,
+    tickers: Annotated[list[str] | None, Field(
+        description="Tickers to analyze (e.g. ['AAPL', 'MSFT']). Auto-creates a portfolio if portfolio_id is not given.",
+        default=None,
+    )] = None,
+    weights: Annotated[list[float] | None, Field(
+        description="Optional weights (must sum to 1.0). Defaults to equal weights.",
+        default=None,
+    )] = None,
+    horizon: Annotated[int, Field(
+        description="Forecast horizon in trading days. ~1 month = 20, ~1 quarter = 60, ~6 months = 120. Default 20.",
+        default=20,
+    )] = 20,
+    n_paths: Annotated[int, Field(
+        description="Number of paths to generate. More = better statistics but slower. 500 default, 1000+ for high-confidence.",
+        default=500,
+    )] = 500,
+) -> list | str:
     if err := _require_auth():
         return err
-    if err := _validate_uuid(model_group_id, "model_group_id"):
+    if err := _validate_uuid(conditioning_set_id, "conditioning_set_id"):
         return err
+
     try:
+        # Step 0: Resolve or auto-create portfolio
+        portfolio, err = await _ensure_portfolio(portfolio_id, tickers, weights)
+        if err:
+            return err
+        portfolio_id = portfolio["id"]
+        target_set_id = portfolio.get("target_set_id")
+        asset_tickers = _portfolio_tickers(portfolio)
+        portfolio_name = portfolio.get("name", "")
+
         client = get_client()
-        job = await client.flow_train(
+
+        # Step 1: Create models (linked to portfolio via parent_target_set_id)
+        create_result = await _retry_api_call(lambda: client.batch_create_models(
+            conditioning_set_id=conditioning_set_id,
+            asset_tickers=asset_tickers,
+            parent_target_set_id=target_set_id,
+            group_name=portfolio_name or None,
+        ))
+        model_group_id = create_result.get("model_group_id")
+        if not model_group_id:
+            return "Error: model creation did not return a model_group_id."
+
+        total_created = create_result.get("total_created", 0)
+        if total_created == 0:
+            return _fmt({
+                "error": "No models were created.",
+                "total_failed": create_result.get("total_failed", 0),
+                "failed_assets": create_result.get("failed_assets", []),
+            })
+
+        # Step 2: Train Flow model (async — poll until done)
+        train_job = await _retry_api_call(lambda: client.flow_train(
             model_group_id=model_group_id,
-            horizon=horizon, obs_length=obs_length, max_epochs=max_epochs,
-        )
-        job_id = job.get("job_id")
-        if not job_id:
+            horizon=horizon,
+        ))
+        train_job_id = train_job.get("job_id")
+        if not train_job_id:
             return "Error: Flow training did not return a job_id."
 
-        feature_names = job.get("feature_names", [])
-        feature_note = ""
-        if feature_names:
-            feature_note = (
-                f" The model's features are: {feature_names}. "
-                "When using flow_generate_constrained_paths, constraint feature_name "
-                "must be one of these."
-            )
+        feature_names = train_job.get("feature_names", [])
 
-        return _fmt({
-            "status": "submitted",
-            "job_id": job_id,
-            "model_group_id": model_group_id,
-            "feature_names": feature_names,
-            "message": (
-                "Flow training job submitted. Training typically takes 5-15 minutes. "
-                "Use get_flow_job_status to check progress. "
-                "Once completed, use flow_generate_paths or flow_generate_constrained_paths."
-                + feature_note
-            ),
-        })
-    except SablierAPIError as e:
-        return _api_error(e)
+        # Poll training until completion
+        train_result = await client.poll_flow_train(train_job_id)
+        train_status = train_result.get("status", "")
+        if train_status == "failed":
+            return _fmt({
+                "error": "Flow training failed.",
+                "model_group_id": model_group_id,
+                "details": train_result.get("error") or train_result,
+            })
+        if train_status != "completed":
+            return _fmt({
+                "error": f"Flow training ended with status '{train_status}'. Try again or check logs.",
+                "model_group_id": model_group_id,
+            })
 
+        # Update feature_names from training result if available
+        if train_result.get("feature_names"):
+            feature_names = train_result["feature_names"]
 
-@server.tool(
-    name="flow_generate_paths",
-    description=(
-        "Generate unconditional multi-step paths from a trained Flow model. "
-        "Produces realistic joint trajectories of assets and factors. "
-        "This is an async GPU job — returns immediately. "
-        "Use get_flow_job_status with job_type='generate' to check progress and retrieve results."
-    ),
-)
-async def flow_generate_paths(
-    model_group_id: Annotated[str, Field(description="UUID of the model group with a trained Flow model")],
-    n_paths: Annotated[int, Field(description="Number of paths to generate (default 100)", default=100)] = 100,
-    horizon: Annotated[int | None, Field(description="Override horizon (defaults to training horizon)", default=None)] = None,
-) -> str:
-    if err := _require_auth():
-        return err
-    if err := _validate_uuid(model_group_id, "model_group_id"):
-        return err
-    try:
-        client = get_client()
-        job = await client.flow_generate_paths(
-            model_group_id=model_group_id, n_paths=n_paths, horizon=horizon,
+        # Step 3: Generate baseline paths (async — poll until done)
+        gen_job = await _retry_api_call(lambda: client.flow_generate_paths(
+            model_group_id=model_group_id,
+            n_paths=n_paths,
+            horizon=horizon,
+        ))
+        gen_job_id = gen_job.get("job_id")
+        if not gen_job_id:
+            return _fmt({
+                "error": "Path generation did not return a job_id.",
+                "model_group_id": model_group_id,
+                "note": "Training succeeded. You can try flow generation again via simulate_flow_scenario.",
+            })
+
+        # Poll generation until completion
+        gen_result = await client.poll_flow_job(
+            gen_job_id, f"/flow/{gen_job_id}/results",
         )
-        job_id = job.get("job_id")
-        if not job_id:
-            return "Error: Path generation did not return a job_id."
+        gen_status = gen_result.get("status", "")
+        if gen_status == "failed":
+            return _fmt({
+                "error": "Path generation failed.",
+                "model_group_id": model_group_id,
+                "details": gen_result.get("error") or gen_result,
+            })
 
-        return _fmt({
-            "status": "submitted",
-            "job_id": job_id,
+        # Step 4: Fetch full results
+        results = await client.flow_get_results(gen_job_id)
+        summary = results.get("summary") or {}
+        if results.get("feature_names"):
+            feature_names = results["feature_names"]
+
+        # Build per-asset stats from summary
+        per_asset = {}
+        for name, data in summary.items():
+            if not isinstance(data, dict):
+                continue
+            per_asset[name] = {
+                "last_price": data.get("last_price"),
+                "mean_return": data.get("mean_return"),
+                "median_terminal": data.get("median_terminal"),
+                "p5": data.get("p5"),
+                "p95": data.get("p95"),
+                "feature_type": data.get("feature_type"),
+            }
+
+        output = {
+            "status": "completed",
             "model_group_id": model_group_id,
-            "message": (
-                "Path generation job submitted. Typically takes 1-3 minutes. "
-                "Use get_flow_job_status with job_type='generate' to check progress and get results."
+            "portfolio_id": portfolio_id,
+            "flow_job_id": str(gen_job_id),
+            "horizon": horizon,
+            "n_paths": results.get("n_paths", n_paths),
+            "feature_names": feature_names,
+            "per_asset": per_asset,
+            "next_steps": (
+                f"To generate constrained what-if scenarios, call simulate_flow_scenario with "
+                f"model_group_id='{model_group_id}' and constraints on any of these features: "
+                f"{', '.join(feature_names[:15])}. "
+                f"To get portfolio risk metrics (VaR, Sharpe, etc.), call test_flow_risk with "
+                f"portfolio_id='{portfolio_id}' and flow_job_id='{gen_job_id}'."
             ),
-        })
+        }
+
+        # Try to generate fan chart widget
+        try:
+            chart_html = flow_fan_chart(summary, horizon)
+            if chart_html:
+                return _with_widget(_fmt(output), chart_html)
+        except Exception:
+            logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
+
+        return _fmt(output)
     except SablierAPIError as e:
         return _api_error(e)
+    except Exception as e:
+        logger.error("generate_synthetic failed: %s", e, exc_info=True)
+        return "Flow analysis failed unexpectedly. Please try again."
 
 
 @server.tool(
-    name="flow_generate_constrained_paths",
+    name="simulate_flow_scenario",
     description=(
-        "Generate paths with inequality constraints using SMC particle filtering. "
-        "Example: generate paths where gold stays above $3000 and VIX stays below 20. "
-        "Constraints specify bounds on feature levels or returns over time windows. "
-        "This is an async GPU job — returns immediately. "
-        "Use get_flow_job_status with job_type='generate' to check progress and retrieve results."
+        "Generate constrained what-if scenarios from a trained Flow model. "
+        "Requires model_group_id from generate_synthetic. "
+        "Specify constraints on asset price levels or returns over time windows. "
+        "Example: 'AAPL stays above $200' → {'feature_name': 'Apple Inc.', 'type': 'level', 'lower': 200, 't_start': 0, 't_end': 20}. "
+        "feature_name must match one of the feature_names returned by generate_synthetic — use the display names. "
+        "Constraint types: 'level' (absolute price/value bounds), 'return' (per-step return bounds). "
+        "The user can choose n_paths (more paths = better diversity in constrained solutions, default 500). "
+        "Returns constrained paths + a paired unconstrained baseline for immediate comparison, "
+        "plus a satisfaction_rate (0-1) measuring how well constraints were met. "
+        "You can run multiple scenarios and compare them using test_flow_risk on each flow_job_id."
     ),
+    annotations=ToolAnnotations(openWorldHint=True),
 )
-async def flow_generate_constrained_paths(
-    model_group_id: Annotated[str, Field(description="UUID of the model group with a trained Flow model")],
+async def simulate_flow_scenario(
+    model_group_id: Annotated[str, Field(
+        description="UUID of the model group with a trained Flow model (from generate_synthetic)"
+    )],
     constraints: Annotated[list[dict], Field(
         description=(
-            "List of inequality constraints. Each constraint: "
-            "{'feature_name': 'GC=F', 'type': 'level', 'lower': 3000, 'upper': null, 't_start': 0, 't_end': 20}. "
-            "feature_name accepts ticker symbols (e.g. 'GC=F', '^VIX', 'VIX') or display names "
-            "(e.g. 'Equity Volatility (VIX)', 'Gold Futures'). "
-            "Types: 'level' (absolute price), 'return' (cumulative return)."
+            "List of constraints. Each: "
+            "{'feature_name': 'Apple Inc.', 'type': 'level', 'lower': 200, 'upper': null, 't_start': 0, 't_end': 20}. "
+            "Types: 'level' (absolute price bounds), 'return' (per-step return bounds). "
+            "feature_name must be from generate_synthetic's feature_names list."
         )
     )],
-    n_paths: Annotated[int, Field(description="Number of paths to generate (default 100)", default=100)] = 100,
-    horizon: Annotated[int | None, Field(description="Override horizon (defaults to training horizon)", default=None)] = None,
-) -> str:
+    n_paths: Annotated[int, Field(
+        description="Number of paths to generate. More = better diversity. 500 default, 1000+ for high-confidence.",
+        default=500,
+    )] = 500,
+    horizon: Annotated[int | None, Field(
+        description="Override horizon (defaults to training horizon).",
+        default=None,
+    )] = None,
+) -> list | str:
     if err := _require_auth():
         return err
     if err := _validate_uuid(model_group_id, "model_group_id"):
         return err
     try:
         client = get_client()
-        job = await client.flow_generate_constrained_paths(
+
+        # Start constrained generation
+        job = await _retry_api_call(lambda: client.flow_generate_constrained_paths(
             model_group_id=model_group_id,
             constraints=constraints,
             n_paths=n_paths,
             horizon=horizon,
-        )
+        ))
         job_id = job.get("job_id")
         if not job_id:
-            return "Error: Constrained path generation did not return a job_id."
+            return "Error: Constrained generation did not return a job_id."
 
-        return _fmt({
-            "status": "submitted",
-            "job_id": job_id,
+        # Poll until completion
+        poll_result = await client.poll_flow_job(
+            job_id, f"/flow/{job_id}/results",
+        )
+        poll_status = poll_result.get("status", "")
+        if poll_status == "failed":
+            return _fmt({
+                "error": "Constrained generation failed.",
+                "model_group_id": model_group_id,
+                "details": poll_result.get("error") or poll_result,
+            })
+
+        # Fetch full results
+        results = await client.flow_get_results(job_id)
+        summary = results.get("summary") or {}
+        baseline_summary = results.get("baseline_summary") or {}
+        satisfaction_rate = results.get("satisfaction_rate")
+        result_horizon = results.get("horizon", horizon or 20)
+
+        # Build per-asset stats
+        per_asset = {}
+        for name, data in summary.items():
+            if not isinstance(data, dict):
+                continue
+            entry = {
+                "last_price": data.get("last_price"),
+                "mean_return": data.get("mean_return"),
+                "median_terminal": data.get("median_terminal"),
+                "p5": data.get("p5"),
+                "p95": data.get("p95"),
+            }
+            # Add baseline comparison if available
+            bl = baseline_summary.get(name) or {}
+            if bl:
+                entry["baseline_mean_return"] = bl.get("mean_return")
+                entry["baseline_median_terminal"] = bl.get("median_terminal")
+            per_asset[name] = entry
+
+        output = {
+            "status": "completed",
             "model_group_id": model_group_id,
-            "message": (
-                "Constrained path generation job submitted. Typically takes 2-5 minutes. "
-                "Use get_flow_job_status with job_type='generate' to check progress and get results."
+            "flow_job_id": str(job_id),
+            "satisfaction_rate": satisfaction_rate,
+            "constraints": constraints,
+            "horizon": result_horizon,
+            "n_paths": results.get("n_paths", n_paths),
+            "per_asset": per_asset,
+            "next_steps": (
+                f"To get portfolio risk metrics for this scenario, call test_flow_risk "
+                f"with flow_job_id='{job_id}'. "
+                f"To compare scenarios, run simulate_flow_scenario with different constraints "
+                f"and call test_flow_risk on each."
             ),
-        })
+        }
+
+        # Try to generate fan chart widget
+        try:
+            chart_html = flow_fan_chart(
+                summary, result_horizon, constraints,
+            )
+            if chart_html:
+                return _with_widget(_fmt(output), chart_html)
+        except Exception:
+            logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
+
+        return _fmt(output)
     except SablierAPIError as e:
         return _api_error(e)
+    except Exception as e:
+        logger.error("simulate_flow_scenario failed: %s", e, exc_info=True)
+        return "Constrained scenario generation failed unexpectedly. Please try again."
+
+
+@server.tool(
+    name="test_flow_risk",
+    description=(
+        "Run portfolio risk analytics on Flow-generated paths. "
+        "Computes expected return, volatility, Sharpe ratio, Sortino ratio, Calmar ratio, "
+        "VaR 95%, CVaR 95%, max drawdown, profitability rate, and return distribution percentiles. "
+        "Requires portfolio_id and flow_job_id from generate_synthetic or simulate_flow_scenario. "
+        "TIP: Call this on multiple flow_job_ids (baseline + different scenarios) to build a "
+        "side-by-side comparison of risk metrics across scenarios."
+    ),
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+)
+async def test_flow_risk(
+    portfolio_id: Annotated[str, Field(
+        description="UUID of the portfolio (from generate_synthetic or list_portfolios)"
+    )],
+    flow_job_id: Annotated[str, Field(
+        description="Flow generation job ID (from generate_synthetic or simulate_flow_scenario)"
+    )],
+) -> list | str:
+    if err := _require_auth():
+        return err
+    if err := _validate_uuid(portfolio_id, "portfolio_id"):
+        return err
+    if err := _validate_uuid(flow_job_id, "flow_job_id"):
+        return err
+    try:
+        client = get_client()
+        result = await client.flow_portfolio_test(portfolio_id, flow_job_id)
+
+        agg = result.get("aggregated_results") or {}
+        stats = result.get("summary_stats") or {}
+        samples = result.get("sample_results") or []
+
+        # Compute profitability
+        profitable = sum(1 for s in samples if (s.get("final_return") or 0) > 0)
+        profit_rate = profitable / len(samples) if samples else None
+
+        output = {
+            "status": "completed",
+            "portfolio_id": portfolio_id,
+            "flow_job_id": flow_job_id,
+            "n_days": result.get("n_days"),
+            "risk_metrics": {
+                "expected_return": agg.get("expected_return"),
+                "volatility": agg.get("volatility"),
+                "sharpe_ratio": agg.get("sharpe_ratio"),
+                "sortino_ratio": agg.get("sortino_ratio"),
+                "calmar_ratio": agg.get("calmar_ratio"),
+                "var_95": agg.get("var_95"),
+                "cvar_95": agg.get("cvar_95"),
+                "max_drawdown": agg.get("max_drawdown"),
+                "profitability_rate": profit_rate,
+            },
+            "return_distribution": {
+                "mean": stats.get("mean_return"),
+                "median": stats.get("median_return"),
+                "std": stats.get("std_return"),
+                "skewness": stats.get("skewness"),
+                "kurtosis": stats.get("kurtosis"),
+            },
+        }
+
+        # Try to generate risk card widget
+        try:
+            card_html = flow_risk_card(result)
+            if card_html:
+                return _with_widget(_fmt(output), card_html)
+        except Exception:
+            logger.warning("Flow risk card generation failed, returning text-only", exc_info=True)
+
+        return _fmt(output)
+    except SablierAPIError as e:
+        return _api_error(e)
+    except Exception as e:
+        logger.error("test_flow_risk failed: %s", e, exc_info=True)
+        return "Flow portfolio risk test failed unexpectedly. Please try again."
 
 
 @server.tool(
@@ -1952,8 +2202,8 @@ async def flow_generate_constrained_paths(
         "Generates paths and compares them to historical distributions using "
         "Wasserstein distance, KS tests, coverage tests, and marginal distribution checks. "
         "Returns a quality badge (EXCELLENT/GOOD/ACCEPTABLE/POOR) and per-feature metrics. "
-        "Requires a trained Flow model (run flow_train first). "
-        "This is an async GPU job — use get_flow_job_status with job_type='validate' to check progress."
+        "Requires a trained Flow model (run generate_synthetic first). "
+        "This is an async GPU job — the tool will poll until completion."
     ),
 )
 async def flow_validate(
@@ -1976,70 +2226,20 @@ async def flow_validate(
         if not job_id:
             return "Error: Flow validation did not return a job_id."
 
-        return _fmt({
-            "status": "submitted",
-            "job_id": job_id,
-            "model_group_id": model_group_id,
-            "message": (
-                "Flow validation job submitted. Typically takes 2-5 minutes. "
-                "Use get_flow_job_status with job_type='validate' to check progress and get results."
-            ),
-        })
-    except SablierAPIError as e:
-        return _api_error(e)
+        # Poll until completion via status endpoint
+        status_result = await client.poll_flow_job(
+            job_id, f"/flow/validate/{job_id}/status",
+        )
+        if status_result.get("status") == "failed":
+            return _fmt({
+                "error": "Flow validation failed.",
+                "model_group_id": model_group_id,
+                "details": status_result.get("error_message") or status_result,
+            })
 
-
-@server.tool(
-    name="get_flow_job_status",
-    description=(
-        "Check the status of a Flow job (training, generation, or validation). "
-        "Use this after flow_train, flow_generate_paths, flow_generate_constrained_paths, "
-        "or flow_validate to check progress and retrieve results when complete. "
-        "Training typically takes 5-15 minutes; generation takes 1-5 minutes."
-    ),
-)
-async def get_flow_job_status(
-    job_id: Annotated[str, Field(description="The job UUID returned by flow_train, flow_generate_paths, or flow_validate")],
-    job_type: Annotated[str, Field(
-        description="Type of job: 'train', 'generate', or 'validate'. Determines which status endpoint to query.",
-        default="train",
-    )] = "train",
-) -> str | list:
-    if err := _require_auth():
-        return err
-    if err := _validate_uuid(job_id, "job_id"):
-        return err
-    try:
-        client = get_client()
-        if job_type == "train":
-            result = await client.flow_train_status(job_id)
-            return _fmt(result)
-        elif job_type == "validate":
-            result = await client.flow_validate_results(job_id)
-            return _fmt(result)
-        else:
-            result = await client.flow_get_results(job_id)
-            # Try to generate fan chart widget for completed generation results
-            summary = result.get("summary") or {}
-            has_ts = any(
-                isinstance(v, dict) and "timeseries" in v
-                for v in summary.values()
-            )
-            if has_ts:
-                try:
-                    chart_html = flow_fan_chart(
-                        summary,
-                        result.get("horizon", 20),
-                        result.get("constraints"),
-                    )
-                    if chart_html:
-                        logger.info(f"Fan chart generated ({len(chart_html)} chars), returning with widget")
-                        return _with_widget(_fmt(result), chart_html)
-                    else:
-                        logger.info("Fan chart returned None — no target features with timeseries")
-                except Exception:
-                    logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
-            return _fmt(result)
+        # Fetch full validation results
+        result = await client.flow_validate_results(job_id)
+        return _fmt(result)
     except SablierAPIError as e:
         return _api_error(e)
 
