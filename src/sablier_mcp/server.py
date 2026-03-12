@@ -1879,7 +1879,8 @@ async def generate_synthetic(
             })
 
         # Step 2: Train Flow model (async — poll until done)
-        train_job = await _retry_api_call(lambda: client.flow_train(
+        # GPU worker is single-threaded; retry with long backoff if busy
+        train_job = await _retry_gpu_call(lambda: client.flow_train(
             model_group_id=model_group_id,
             horizon=horizon,
         ))
@@ -1909,7 +1910,7 @@ async def generate_synthetic(
             feature_names = train_result["feature_names"]
 
         # Step 3: Generate baseline paths (async — poll until done)
-        gen_job = await _retry_api_call(lambda: client.flow_generate_paths(
+        gen_job = await _retry_gpu_call(lambda: client.flow_generate_paths(
             model_group_id=model_group_id,
             n_paths=n_paths,
             horizon=horizon,
@@ -1972,7 +1973,6 @@ async def generate_synthetic(
             ),
         }
 
-        # Try to generate fan chart widget
         try:
             chart_html = flow_fan_chart(summary, horizon)
             if chart_html:
@@ -2032,8 +2032,8 @@ async def simulate_flow_scenario(
     try:
         client = get_client()
 
-        # Start constrained generation
-        job = await _retry_api_call(lambda: client.flow_generate_constrained_paths(
+        # Start constrained generation (GPU worker — retry if busy)
+        job = await _retry_gpu_call(lambda: client.flow_generate_constrained_paths(
             model_group_id=model_group_id,
             constraints=constraints,
             n_paths=n_paths,
@@ -2098,11 +2098,8 @@ async def simulate_flow_scenario(
             ),
         }
 
-        # Try to generate fan chart widget
         try:
-            chart_html = flow_fan_chart(
-                summary, result_horizon, constraints,
-            )
+            chart_html = flow_fan_chart(summary, result_horizon, constraints)
             if chart_html:
                 return _with_widget(_fmt(output), chart_html)
         except Exception:
@@ -2179,7 +2176,6 @@ async def test_flow_risk(
             },
         }
 
-        # Try to generate risk card widget
         try:
             card_html = flow_risk_card(result)
             if card_html:
@@ -2370,6 +2366,34 @@ async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
             await asyncio.sleep(delay)
             delay *= 2  # exponential backoff
     raise last_exc  # unreachable, but keeps type checker happy
+
+
+async def _retry_gpu_call(coro_fn, max_wait: float = 300.0, initial_delay: float = 15.0):
+    """Retry a GPU worker call that may fail with 'Worker busy'.
+
+    GPU jobs (flow_train, flow_generate) use a single worker that can only process
+    one job at a time. This retries with exponential backoff up to max_wait seconds.
+    """
+    last_exc = None
+    delay = initial_delay
+    elapsed = 0.0
+    attempt = 0
+    while elapsed < max_wait:
+        try:
+            return await coro_fn()
+        except SablierAPIError as e:
+            last_exc = e
+            is_busy = e.status_code >= 500 and "busy" in str(e).lower()
+            if not is_busy:
+                raise  # not a worker-busy error, propagate immediately
+            attempt += 1
+            if elapsed + delay >= max_wait:
+                raise
+            logger.warning("GPU worker busy (attempt %d) — retrying in %.0fs", attempt, delay)
+            await asyncio.sleep(delay)
+            elapsed += delay
+            delay = min(delay * 1.5, 60.0)  # cap at 60s between retries
+    raise last_exc  # unreachable
 
 
 # ══════════════════════════════════════════════════
