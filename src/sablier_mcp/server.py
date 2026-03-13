@@ -2347,6 +2347,98 @@ async def market_radar() -> str:
         return f"Market radar failed: {e}"
 
 
+# ══════════════════════════════════════════════════
+# Billing
+# ══════════════════════════════════════════════════
+
+@server.tool(
+    name="get_billing_info",
+    description=(
+        "Get your current billing info: subscription tier, included limits, "
+        "overage rates, and usage for the current month. Use this to check "
+        "what operations are available and what they cost."
+    ),
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_billing_info() -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        data = await client.get_billing_info()
+        return _fmt(data)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="get_billing_usage",
+    description=(
+        "Get detailed usage breakdown for the current or a specific billing month. "
+        "Shows per-operation counts, included limits, overage counts, and costs. "
+        "Month format: YYYY-MM (e.g. '2026-03')."
+    ),
+    annotations=ToolAnnotations(readOnlyHint=True),
+)
+async def get_billing_usage(
+    month: Annotated[str | None, Field(
+        description="Billing month in YYYY-MM format. Defaults to current month.",
+        default=None,
+    )] = None,
+) -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        data = await client.get_billing_usage(month)
+        return _fmt(data)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="subscribe",
+    description=(
+        "Subscribe to a Sablier plan or upgrade your current subscription. "
+        "Returns a Stripe Checkout URL to complete payment. "
+        "Tiers: 'starter' (Pro, $59/mo), 'pro' (Pro+, $199/mo), 'enterprise' ($499/mo per seat). "
+        "If already subscribed, returns a portal URL to manage/change your subscription."
+    ),
+)
+async def subscribe(
+    tier: Annotated[str, Field(description="Subscription tier: 'starter', 'pro', or 'enterprise'")],
+) -> str:
+    if err := _require_auth():
+        return err
+    if tier not in ('starter', 'pro', 'enterprise'):
+        return "Invalid tier. Choose: 'starter' (Pro, $59/mo), 'pro' (Pro+, $199/mo), or 'enterprise' ($499/mo/seat)"
+    try:
+        client = get_client()
+        data = await client.create_checkout_session(tier)
+        return _fmt(data)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
+@server.tool(
+    name="manage_subscription",
+    description=(
+        "Open the Stripe Customer Portal to manage your subscription: "
+        "upgrade, downgrade, cancel, or update payment method. "
+        "Returns a portal URL."
+    ),
+)
+async def manage_subscription() -> str:
+    if err := _require_auth():
+        return err
+    try:
+        client = get_client()
+        data = await client.create_portal_session()
+        return _fmt(data)
+    except SablierAPIError as e:
+        return _api_error(e)
+
+
 async def _retry_api_call(coro_fn, max_retries: int = 2, delay: float = 3.0):
     """Retry an async API call on transient server errors (5xx) and rate limits (429).
 

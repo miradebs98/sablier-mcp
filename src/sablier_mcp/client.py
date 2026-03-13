@@ -761,6 +761,37 @@ class SablierClient:
         return await self._delete(f"/user-api-keys/{provider}")
 
     # ──────────────────────────────────────────────
+    # Billing
+    # ──────────────────────────────────────────────
+
+    async def create_checkout_session(self, tier: str, success_url: str | None = None, cancel_url: str | None = None) -> dict:
+        """Create a Stripe Checkout Session for subscribing to a tier."""
+        body: dict = {"tier": tier}
+        if success_url:
+            body["success_url"] = success_url
+        if cancel_url:
+            body["cancel_url"] = cancel_url
+        return await self._post("/billing/checkout", json=body)
+
+    async def create_portal_session(self, return_url: str | None = None) -> dict:
+        """Create a Stripe Customer Portal session to manage subscription."""
+        body: dict = {}
+        if return_url:
+            body["return_url"] = return_url
+        return await self._post("/billing/portal", json=body)
+
+    async def get_billing_info(self) -> dict:
+        """Get billing info: tier, usage, limits, overage rates."""
+        return await self._get("/billing/info")
+
+    async def get_billing_usage(self, month: str | None = None) -> dict:
+        """Get usage breakdown for current or specified month."""
+        params = {}
+        if month:
+            params["month"] = month
+        return await self._get("/billing/usage", params=params)
+
+    # ──────────────────────────────────────────────
     # Tests
     # ──────────────────────────────────────────────
 
