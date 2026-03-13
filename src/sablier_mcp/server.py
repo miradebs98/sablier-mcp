@@ -10,6 +10,7 @@ Remote mode uses OAuth 2.0 — Claude Desktop opens a browser for login.
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -85,6 +86,35 @@ if _oauth_provider is not None:
 
 _stdio_client: SablierClient | None = None
 _token_clients: dict[str, SablierClient] = {}
+
+# Global lock for Flow GPU jobs — the worker handles one job at a time.
+# Prevents the MCP from submitting concurrent train/generate/validate jobs.
+_flow_gpu_lock = asyncio.Lock()
+
+
+class _FlowGPUBusy(Exception):
+    """Raised when the GPU lock cannot be acquired (another Flow job is running)."""
+    pass
+
+
+@asynccontextmanager
+async def _acquire_gpu(timeout: float = 30.0):
+    """Acquire the Flow GPU lock with a timeout.
+
+    If another Flow job is already running, waits up to `timeout` seconds.
+    Raises _FlowGPUBusy if the lock isn't acquired in time.
+    """
+    try:
+        await asyncio.wait_for(_flow_gpu_lock.acquire(), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise _FlowGPUBusy(
+            "Another Flow GPU job is already running. "
+            "Please wait for it to finish before starting a new one."
+        )
+    try:
+        yield
+    finally:
+        _flow_gpu_lock.release()
 
 
 def get_client() -> SablierClient:
@@ -1967,22 +1997,24 @@ async def generate_synthetic(
             except Exception:
                 logger.debug("Could not check model group status", exc_info=True)
 
-            # Model is trained — generate paths
-            gen_job = await _retry_gpu_call(lambda: client.flow_generate_paths(
-                model_group_id=model_group_id,
-                n_paths=n_paths,
-                horizon=horizon,
-            ))
-            gen_job_id = gen_job.get("job_id")
-            if not gen_job_id:
-                return _fmt({
-                    "error": "Path generation did not return a job_id.",
-                    "model_group_id": model_group_id,
-                })
+            # Model is trained — generate paths (hold GPU lock for full duration)
+            async with _acquire_gpu():
+                gen_job = await _retry_gpu_call(lambda: client.flow_generate_paths(
+                    model_group_id=model_group_id,
+                    n_paths=n_paths,
+                    horizon=horizon,
+                ))
+                gen_job_id = gen_job.get("job_id")
+                if not gen_job_id:
+                    return _fmt({
+                        "error": "Path generation did not return a job_id.",
+                        "model_group_id": model_group_id,
+                    })
 
-            gen_result = await client.poll_flow_job(
-                gen_job_id, f"/flow/{gen_job_id}/results",
-            )
+                gen_result = await client.poll_flow_job(
+                    gen_job_id, f"/flow/{gen_job_id}/results",
+                )
+
             gen_status = gen_result.get("status", "")
             if gen_status == "failed":
                 return _fmt({
@@ -2031,55 +2063,57 @@ async def generate_synthetic(
                     "failed_assets": create_result.get("failed_assets", []),
                 })
 
-            # Step 2: Train Flow model (async — poll until done)
-            # GPU worker is single-threaded; retry with long backoff if busy
-            train_job = await _retry_gpu_call(lambda: client.flow_train(
-                model_group_id=model_group_id,
-                horizon=horizon,
-            ))
-            train_job_id = train_job.get("job_id")
-            if not train_job_id:
-                return "Error: Flow training did not return a job_id."
+            # Steps 2-3: Train + Generate (hold GPU lock for full duration)
+            async with _acquire_gpu():
+                # Step 2: Train Flow model
+                train_job = await _retry_gpu_call(lambda: client.flow_train(
+                    model_group_id=model_group_id,
+                    horizon=horizon,
+                ))
+                train_job_id = train_job.get("job_id")
+                if not train_job_id:
+                    return "Error: Flow training did not return a job_id."
 
-            feature_names = train_job.get("feature_names", [])
+                feature_names = train_job.get("feature_names", [])
 
-            # Poll training until completion
-            train_result = await client.poll_flow_train(train_job_id)
-            train_status = train_result.get("status", "")
-            if train_status == "failed":
-                return _fmt({
-                    "error": "Flow training failed.",
-                    "model_group_id": model_group_id,
-                    "details": train_result.get("error") or train_result,
-                })
-            if train_status != "completed":
-                return _fmt({
-                    "error": f"Flow training ended with status '{train_status}'. Try again or check logs.",
-                    "model_group_id": model_group_id,
-                })
+                # Poll training until completion
+                train_result = await client.poll_flow_train(train_job_id)
+                train_status = train_result.get("status", "")
+                if train_status == "failed":
+                    return _fmt({
+                        "error": "Flow training failed.",
+                        "model_group_id": model_group_id,
+                        "details": train_result.get("error") or train_result,
+                    })
+                if train_status != "completed":
+                    return _fmt({
+                        "error": f"Flow training ended with status '{train_status}'. Try again or check logs.",
+                        "model_group_id": model_group_id,
+                    })
 
-            # Update feature_names from training result if available
-            if train_result.get("feature_names"):
-                feature_names = train_result["feature_names"]
+                # Update feature_names from training result if available
+                if train_result.get("feature_names"):
+                    feature_names = train_result["feature_names"]
 
-            # Step 3: Generate baseline paths (async — poll until done)
-            gen_job = await _retry_gpu_call(lambda: client.flow_generate_paths(
-                model_group_id=model_group_id,
-                n_paths=n_paths,
-                horizon=horizon,
-            ))
-            gen_job_id = gen_job.get("job_id")
-            if not gen_job_id:
-                return _fmt({
-                    "error": "Path generation did not return a job_id.",
-                    "model_group_id": model_group_id,
-                    "note": "Training succeeded. You can retry with model_group_id to skip training.",
-                })
+                # Step 3: Generate baseline paths
+                gen_job = await _retry_gpu_call(lambda: client.flow_generate_paths(
+                    model_group_id=model_group_id,
+                    n_paths=n_paths,
+                    horizon=horizon,
+                ))
+                gen_job_id = gen_job.get("job_id")
+                if not gen_job_id:
+                    return _fmt({
+                        "error": "Path generation did not return a job_id.",
+                        "model_group_id": model_group_id,
+                        "note": "Training succeeded. You can retry with model_group_id to skip training.",
+                    })
 
-            # Poll generation until completion
-            gen_result = await client.poll_flow_job(
-                gen_job_id, f"/flow/{gen_job_id}/results",
-            )
+                # Poll generation until completion
+                gen_result = await client.poll_flow_job(
+                    gen_job_id, f"/flow/{gen_job_id}/results",
+                )
+
             gen_status = gen_result.get("status", "")
             if gen_status == "failed":
                 return _fmt({
@@ -2135,6 +2169,8 @@ async def generate_synthetic(
             logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
 
         return _fmt(output)
+    except _FlowGPUBusy as e:
+        return str(e)
     except SablierAPIError as e:
         return _api_error(e)
     except Exception as e:
@@ -2188,21 +2224,23 @@ async def simulate_flow_scenario(
     try:
         client = get_client()
 
-        # Start constrained generation (GPU worker — retry if busy)
-        job = await _retry_gpu_call(lambda: client.flow_generate_constrained_paths(
-            model_group_id=model_group_id,
-            constraints=constraints,
-            n_paths=n_paths,
-            horizon=horizon,
-        ))
-        job_id = job.get("job_id")
-        if not job_id:
-            return "Error: Constrained generation did not return a job_id."
+        # Constrained generation (hold GPU lock for full duration)
+        async with _acquire_gpu():
+            job = await _retry_gpu_call(lambda: client.flow_generate_constrained_paths(
+                model_group_id=model_group_id,
+                constraints=constraints,
+                n_paths=n_paths,
+                horizon=horizon,
+            ))
+            job_id = job.get("job_id")
+            if not job_id:
+                return "Error: Constrained generation did not return a job_id."
 
-        # Poll until completion
-        poll_result = await client.poll_flow_job(
-            job_id, f"/flow/{job_id}/results",
-        )
+            # Poll until completion
+            poll_result = await client.poll_flow_job(
+                job_id, f"/flow/{job_id}/results",
+            )
+
         poll_status = poll_result.get("status", "")
         if poll_status == "failed":
             return _fmt({
@@ -2263,6 +2301,8 @@ async def simulate_flow_scenario(
             logger.warning("Fan chart generation failed, returning text-only", exc_info=True)
 
         return _fmt(output)
+    except _FlowGPUBusy as e:
+        return str(e)
     except SablierAPIError as e:
         return _api_error(e)
     except Exception as e:
@@ -2404,19 +2444,23 @@ async def flow_validate(
         return err
     try:
         client = get_client()
-        job = await client.flow_validate(
-            model_group_id=model_group_id,
-            n_paths=n_paths,
-            horizon=horizon,
-        )
-        job_id = job.get("job_id")
-        if not job_id:
-            return "Error: Flow validation did not return a job_id."
 
-        # Poll until completion via status endpoint
-        status_result = await client.poll_flow_job(
-            job_id, f"/flow/validate/{job_id}/status",
-        )
+        # Hold GPU lock for full validation duration
+        async with _acquire_gpu():
+            job = await _retry_gpu_call(lambda: client.flow_validate(
+                model_group_id=model_group_id,
+                n_paths=n_paths,
+                horizon=horizon,
+            ))
+            job_id = job.get("job_id")
+            if not job_id:
+                return "Error: Flow validation did not return a job_id."
+
+            # Poll until completion via status endpoint
+            status_result = await client.poll_flow_job(
+                job_id, f"/flow/validate/{job_id}/status",
+            )
+
         if status_result.get("status") == "failed":
             return _fmt({
                 "error": "Flow validation failed.",
@@ -2427,6 +2471,8 @@ async def flow_validate(
         # Fetch full validation results
         result = await client.flow_validate_results(job_id)
         return _fmt(result)
+    except _FlowGPUBusy as e:
+        return str(e)
     except SablierAPIError as e:
         return _api_error(e)
 
