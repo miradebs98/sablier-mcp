@@ -309,27 +309,37 @@ async def _ensure_portfolio(
 
 
 async def _validate_conditioning_data(conditioning_set_id: str) -> str | None:
-    """Check that all features in a conditioning set have training data.
+    """Ensure features in a conditioning set have training data.
 
-    Returns an error string if any features are missing data, else None.
+    If fetched_data_available is false, auto-refreshes the tickers.
+    Never blocks — if refresh fails, logs a warning and lets training
+    decide whether data is sufficient.
     """
     client = get_client()
     feature_set = await client.get_feature_set(conditioning_set_id)
 
-    if feature_set.get("fetched_data_available") is False:
-        features = feature_set.get("features", [])
-        missing = [
-            f.get("ticker") or f.get("display_name")
-            for f in features
-            if isinstance(f, dict) and f.get("type") != "indicator"
-        ]
-        missing = [t for t in missing if t]
-        return (
-            f"Conditioning set has no fetched data. These features need data: {', '.join(missing)}. "
-            f"Call refresh_feature_data for each, or use a pre-built template from list_feature_set_templates."
-        )
+    if feature_set.get("fetched_data_available") is not False:
+        return None  # Flag is true or absent — proceed
 
-    return None
+    # Collect tickers that need data (skip computed indicators)
+    features = feature_set.get("features", [])
+    tickers = [
+        f.get("ticker")
+        for f in features
+        if isinstance(f, dict) and f.get("type") != "indicator" and f.get("ticker")
+    ]
+
+    if not tickers:
+        return None
+
+    # Auto-refresh so training has the best chance of succeeding
+    try:
+        logger.info("Auto-refreshing %d features for conditioning set %s", len(tickers), conditioning_set_id)
+        await client.refresh_feature_data(tickers)
+    except Exception:
+        logger.warning("Auto-refresh failed for conditioning set %s — proceeding anyway", conditioning_set_id, exc_info=True)
+
+    return None  # Never block — let training validate data sufficiency
 
 
 _NOT_LOGGED_IN = (
