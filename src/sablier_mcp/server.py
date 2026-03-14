@@ -2709,19 +2709,20 @@ async def get_billing_usage(
     name="subscribe",
     description=(
         "Subscribe to a Sablier plan (new subscription). Returns a Stripe Checkout URL to complete payment. "
-        "Tiers: 'starter' (Pro, $59/mo), 'pro' (Pro+, $199/mo), 'enterprise' ($499/mo per seat). "
+        "Tiers: 'pro' (Pro, $79/mo — 100 Moment fits, 100 GRAIN, 20 Flow trains), "
+        "'enterprise' (Enterprise, $399/mo per seat — unlimited everything). "
         "To manage an existing subscription (upgrade, downgrade, cancel, update payment), "
         "use manage_subscription instead."
     ),
     annotations=ToolAnnotations(destructiveHint=True),
 )
 async def subscribe(
-    tier: Annotated[str, Field(description="Subscription tier: 'starter', 'pro', or 'enterprise'")],
+    tier: Annotated[str, Field(description="Subscription tier: 'pro' ($79/mo) or 'enterprise' ($399/mo per seat)")],
 ) -> str:
     if err := _require_auth():
         return err
-    if tier not in ('starter', 'pro', 'enterprise'):
-        return "Invalid tier. Choose: 'starter' (Pro, $59/mo), 'pro' (Pro+, $199/mo), or 'enterprise' ($499/mo/seat)"
+    if tier not in ('pro', 'enterprise'):
+        return "Invalid tier. Choose: 'pro' (Pro, $79/mo) or 'enterprise' (Enterprise, $399/mo per seat)"
     try:
         client = get_client()
         data = await client.create_checkout_session(tier)
