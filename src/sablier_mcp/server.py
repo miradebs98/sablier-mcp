@@ -371,7 +371,7 @@ def _require_auth() -> str | None:
 @server.tool(
     name="search_features",
     description="Search for tickers (stocks, ETFs) and market indicators (VIX, DXY, rates). Returns matching symbols with descriptions. Use this to validate tickers before creating a portfolio.",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Search Features", readOnlyHint=True, openWorldHint=True),
 )
 async def search_features(
     query: Annotated[str, Field(description="Search term (e.g. 'AAPL', 'technology', 'volatility', 'gold')")],
@@ -412,7 +412,7 @@ async def search_features(
         "Keys are encrypted at rest. Required before using FRED features — "
         "get a free FRED key at https://fred.stlouisfed.org/docs/api/api_key.html"
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Set API Key", destructiveHint=True),
 )
 async def set_api_key(
     provider: Annotated[str, Field(description="Provider name: 'fred' or 'finnhub'")],
@@ -435,7 +435,7 @@ async def set_api_key(
 @server.tool(
     name="list_api_keys",
     description="List the user's stored third-party API keys (providers only, no secrets shown).",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List API Keys", readOnlyHint=True),
 )
 async def list_api_keys() -> str:
     if err := _require_auth():
@@ -457,7 +457,7 @@ async def list_api_keys() -> str:
 @server.tool(
     name="delete_api_key",
     description="Delete a user's stored API key for a third-party provider.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete API Key", destructiveHint=True),
 )
 async def delete_api_key(
     provider: Annotated[str, Field(description="Provider to remove: 'fred' or 'finnhub'")],
@@ -487,7 +487,7 @@ async def delete_api_key(
         "Set is_asset=true for assets that go into portfolios, false for conditioning factors. "
         "After adding, call refresh_feature_data to populate its historical data."
     ),
-    annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Add Feature", destructiveHint=True, openWorldHint=True),
 )
 async def add_feature(
     ticker: Annotated[str, Field(description="Ticker symbol (e.g. 'AAPL', 'DFF', 'CL=F')")],
@@ -531,7 +531,7 @@ async def add_feature(
         "For new features: full fetch from 2000. For existing: incremental update to today. "
         "Use this after add_feature, or to force-update stale data."
     ),
-    annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Refresh Feature Data", destructiveHint=True, openWorldHint=True),
 )
 async def refresh_feature_data(
     tickers: Annotated[list[str], Field(description="Tickers to refresh (e.g. ['AAPL', 'CL=F', 'DFF'])")],
@@ -553,7 +553,7 @@ async def refresh_feature_data(
         "Examples: 20-day moving average of VIX, spread between 10Y and 2Y rates. "
         "Use list_transformations to see available transformation types."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Create Derived Feature", destructiveHint=True),
 )
 async def create_derived_feature(
     name: Annotated[str, Field(description="Unique name/ticker for the derived feature (e.g. 'VIX_MA20')")],
@@ -580,7 +580,7 @@ async def create_derived_feature(
 @server.tool(
     name="list_transformations",
     description="List available transformation types for creating derived features. Returns names, parameter schemas, and examples.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Transformations", readOnlyHint=True),
 )
 async def list_transformations() -> str:
     if err := _require_auth():
@@ -601,7 +601,7 @@ async def list_transformations() -> str:
 @server.tool(
     name="list_portfolios",
     description="List the user's existing portfolios with names, IDs, asset compositions, and status.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Portfolios", readOnlyHint=True),
 )
 async def list_portfolios(
     limit: Annotated[int, Field(description="Max portfolios to return", default=50)] = 50,
@@ -632,7 +632,7 @@ async def list_portfolios(
 @server.tool(
     name="get_portfolio",
     description="Get detailed information about a specific portfolio including assets, weights, and associated feature sets. Use the portfolio ID from list_portfolios.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Portfolio", readOnlyHint=True),
 )
 async def get_portfolio(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -652,7 +652,7 @@ async def get_portfolio(
 @server.tool(
     name="create_portfolio",
     description="Create a new portfolio from tickers and weights. Weights must sum to 1.0. For a single asset, use weight 1.0.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Create Portfolio", destructiveHint=True),
 )
 async def create_portfolio(
     name: Annotated[str, Field(description="Portfolio name (e.g. 'Tech Portfolio')")],
@@ -698,7 +698,7 @@ async def create_portfolio(
         "Only pass the fields you want to update — omitted fields stay unchanged. "
         "Weights must sum to 1.0 if provided."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Update Portfolio", destructiveHint=True),
 )
 async def update_portfolio(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -740,7 +740,7 @@ async def update_portfolio(
 @server.tool(
     name="get_portfolio_value",
     description="Get the current live value of a portfolio: total value, P&L, and per-position breakdown.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Portfolio Value", readOnlyHint=True),
 )
 async def get_portfolio_value(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -760,7 +760,7 @@ async def get_portfolio_value(
 @server.tool(
     name="get_portfolio_analytics",
     description="Get historical portfolio analytics: Sharpe ratio, volatility, expected return, max drawdown, and market beta (benchmarked vs SPY). Supports timeframes: 1W, 1M, 1Y, 2Y, 5Y. This is backward-looking — for forward-looking risk, use simulate_returns or test_flow_risk.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Portfolio Analytics", readOnlyHint=True),
 )
 async def get_portfolio_analytics(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -781,7 +781,7 @@ async def get_portfolio_analytics(
 @server.tool(
     name="get_asset_profiles",
     description="Get asset classification for a portfolio: sector, industry, country, exchange, and asset type per holding.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Asset Profiles", readOnlyHint=True),
 )
 async def get_asset_profiles(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -801,7 +801,7 @@ async def get_asset_profiles(
 @server.tool(
     name="delete_portfolio",
     description="Delete a portfolio by ID. This is permanent and cannot be undone.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete Portfolio", destructiveHint=True),
 )
 async def delete_portfolio(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID to delete")],
@@ -831,7 +831,7 @@ async def delete_portfolio(
         "'exposure_target' (match target factor exposures — set target_exposures on the API). "
         "Default: 'max_sharpe'. Long-only constraint applied by default."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Optimize Portfolio", readOnlyHint=True, openWorldHint=True),
 )
 async def optimize_portfolio(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -862,7 +862,7 @@ async def optimize_portfolio(
         "Each point includes optimal weights, expected return, and volatility. "
         "This is a historical analysis — for forward-looking optimization, use optimize_portfolio with simulation data."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Efficient Frontier", readOnlyHint=True),
 )
 async def get_efficient_frontier(
     portfolio_id: Annotated[str, Field(description="The portfolio UUID")],
@@ -892,7 +892,7 @@ async def get_efficient_frontier(
         "to themes (0-100). Supports predefined themes ('AI exposure') or custom themes. "
         "Pass either portfolio_id or tickers directly."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Analyze Qualitative", readOnlyHint=True, openWorldHint=True),
 )
 async def analyze_qualitative(
     themes: Annotated[list[str], Field(description="Themes to score (e.g. ['AI exposure', 'Saudi Arabia risk', 'debt levels'])")],
@@ -1017,7 +1017,7 @@ async def analyze_qualitative(
 @server.tool(
     name="list_themes",
     description="Browse the GRAIN theme library. Returns predefined themes with names, descriptions, keywords, and categories.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Themes", readOnlyHint=True),
 )
 async def list_themes() -> str:
     if err := _require_auth():
@@ -1042,7 +1042,7 @@ async def list_themes() -> str:
 @server.tool(
     name="list_grain_analyses",
     description="List past qualitative (GRAIN) analyses. Optionally filter by portfolio_id.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List GRAIN Analyses", readOnlyHint=True),
 )
 async def list_grain_analyses(
     portfolio_id: Annotated[str | None, Field(description="Optional: filter by portfolio UUID", default=None)] = None,
@@ -1062,7 +1062,7 @@ async def list_grain_analyses(
 @server.tool(
     name="get_grain_analysis",
     description="Load a saved GRAIN analysis with full results: theme scores, per-ticker breakdown, and evidence passages.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get GRAIN Analysis", readOnlyHint=True),
 )
 async def get_grain_analysis(
     analysis_id: Annotated[str, Field(description="The analysis UUID from list_grain_analyses")],
@@ -1082,7 +1082,7 @@ async def get_grain_analysis(
 @server.tool(
     name="delete_grain_analysis",
     description="Delete a saved GRAIN qualitative analysis by ID. This cannot be undone.",
-    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete GRAIN Analysis", readOnlyHint=False, destructiveHint=True),
 )
 async def delete_grain_analysis(
     analysis_id: Annotated[str, Field(description="The analysis UUID to delete")],
@@ -1107,7 +1107,7 @@ async def delete_grain_analysis(
 @server.tool(
     name="list_model_groups",
     description="List all model groups (each created by analyze_quantitative or generate_synthetic). A model group ties a portfolio to a conditioning set and contains per-asset models. Check model_type: null/absent = Moment (linear), 'flow_generative' = Flow. Use this to find model_group_ids for simulate_betas, simulate_returns, generate_synthetic (resume), or run_model_validation.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Model Groups", readOnlyHint=True),
 )
 async def list_model_groups() -> str:
     if err := _require_auth():
@@ -1143,7 +1143,7 @@ async def list_model_groups() -> str:
 @server.tool(
     name="list_feature_set_templates",
     description="Browse pre-built sets of market drivers (e.g. interest rates, volatility, commodities). Returns template names, factors, and conditioning_set_id needed by analyze_quantitative.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Feature Set Templates", readOnlyHint=True),
 )
 async def list_feature_set_templates() -> str:
     if err := _require_auth():
@@ -1165,7 +1165,7 @@ async def list_feature_set_templates() -> str:
         "The display_name is auto-resolved from available_features if omitted. "
         "Returns the conditioning_set_id that can be passed to analyze_quantitative."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Create Feature Set", destructiveHint=True),
 )
 async def create_feature_set(
     name: Annotated[str, Field(description="Name for the set (e.g. 'Custom Macro Factors')")],
@@ -1206,7 +1206,7 @@ async def create_feature_set(
         "Filter by set_type ('conditioning' or 'target'). "
         "Use this to find conditioning_set_id values for analyze_quantitative."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Feature Sets", readOnlyHint=True),
 )
 async def list_feature_sets(
     set_type: Annotated[str | None, Field(description="Filter: 'conditioning' or 'target'. Omit for all.", default=None)] = None,
@@ -1235,7 +1235,7 @@ async def list_feature_sets(
 @server.tool(
     name="get_feature_set",
     description="Get detailed information about a specific feature set including all features and their configuration.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Feature Set", readOnlyHint=True),
 )
 async def get_feature_set(
     feature_set_id: Annotated[str, Field(description="UUID of the feature set")],
@@ -1255,7 +1255,7 @@ async def get_feature_set(
 @server.tool(
     name="delete_feature_set",
     description="Delete a custom feature set. This is permanent and cannot be undone. Cannot delete shared templates.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete Feature Set", destructiveHint=True),
 )
 async def delete_feature_set(
     feature_set_id: Annotated[str, Field(description="UUID of the feature set to delete")],
@@ -1275,7 +1275,7 @@ async def delete_feature_set(
 @server.tool(
     name="delete_model_group",
     description="Delete a model group and all its models, simulations, and associated data. This is permanent.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete Model Group", destructiveHint=True),
 )
 async def delete_model_group(
     model_group_id: Annotated[str, Field(description="UUID of the model group to delete")],
@@ -1299,7 +1299,7 @@ async def delete_model_group(
         "Shows how much unexplained co-movement exists between assets after accounting for factor exposures. "
         "High residual correlations suggest missing common factors."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Residual Correlation", readOnlyHint=True),
 )
 async def get_residual_correlation(
     model_group_id: Annotated[str, Field(description="UUID of the model group")],
@@ -1319,7 +1319,7 @@ async def get_residual_correlation(
 @server.tool(
     name="list_simulations",
     description="List past beta computation runs for a Moment model group. Each entry is a simulate_betas invocation with its simulation_batch_id, date, and status. Use this to find older simulation_batch_ids for simulate_returns. NOT for Flow models — use list_flow_scenarios for those.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Simulations", readOnlyHint=True),
 )
 async def list_simulations(
     model_group_id: Annotated[str, Field(description="UUID of the model group")],
@@ -1347,7 +1347,7 @@ async def list_simulations(
         "You do NOT need this if you just ran analyze_quantitative — it already includes this step. "
         "Returns per-asset factor exposures, simulation_batch_id (for simulate_returns), and factor_last_values_raw."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Simulate Betas", readOnlyHint=True, openWorldHint=True),
 )
 async def simulate_betas(
     model_group_id: Annotated[str, Field(description="UUID of the trained model group (from analyze_quantitative or list_model_groups)")],
@@ -1388,7 +1388,7 @@ async def simulate_betas(
         "Use this after analyze_quantitative to assess model reliability before running scenarios. "
         "For cached results from a previous run, use get_model_validation instead."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Run Model Validation", readOnlyHint=True, openWorldHint=True),
 )
 async def run_model_validation(
     model_group_id: Annotated[str, Field(description="UUID of the model group (from analyze_quantitative or list_model_groups)")],
@@ -1419,7 +1419,7 @@ async def run_model_validation(
         "Returns per-asset model quality: R², autocorrelation, regime sensitivity, pass rate, "
         "and quality badge. To trigger a fresh validation, use run_model_validation instead."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Model Validation", readOnlyHint=True),
 )
 async def get_model_validation(
     model_group_id: Annotated[str, Field(description="UUID of the model group (from analyze_quantitative or list_model_groups)")],
@@ -1475,7 +1475,7 @@ def _format_validation_results(model_group_id: str, result: dict) -> str:
         "For saved/reusable scenarios, use create_scenario + run_scenario instead. "
         "For Flow (generative) models, use simulate_flow_scenario instead."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Simulate Returns", readOnlyHint=True, openWorldHint=True),
 )
 async def simulate_returns(
     simulation_batch_id: Annotated[str, Field(description="From analyze_quantitative or simulate_betas results")],
@@ -1551,7 +1551,7 @@ async def simulate_returns(
         "Factor spec format: {'VIX': {'type': 'fixed', 'value': 35}}. "
         "Supported types: 'fixed' (exact value), 'percentile' (historical percentile), 'shock' (std dev shift)."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Create Scenario", destructiveHint=True),
 )
 async def create_scenario(
     model_id: Annotated[str, Field(description="UUID of the model this scenario applies to")],
@@ -1589,7 +1589,7 @@ async def create_scenario(
         "to execute one, use run_scenario. For ad-hoc tests, use simulate_returns directly. "
         "NOT for Flow scenarios — use list_flow_scenarios for those."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Scenarios", readOnlyHint=True),
 )
 async def list_scenarios(
     model_id: Annotated[str | None, Field(description="Optional model UUID to filter by", default=None)] = None,
@@ -1621,7 +1621,7 @@ async def list_scenarios(
 @server.tool(
     name="get_scenario",
     description="Get detailed information about a saved scenario including its factor specs.",
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Scenario", readOnlyHint=True),
 )
 async def get_scenario(
     scenario_id: Annotated[str, Field(description="The scenario UUID")],
@@ -1644,7 +1644,7 @@ async def get_scenario(
         "Update a saved scenario. Can change name, description, or factor specs. "
         "Only pass the fields you want to update."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Update Scenario", destructiveHint=True),
 )
 async def update_scenario(
     scenario_id: Annotated[str, Field(description="The scenario UUID")],
@@ -1676,7 +1676,7 @@ async def update_scenario(
 @server.tool(
     name="delete_scenario",
     description="Delete a saved scenario. This is permanent.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Delete Scenario", destructiveHint=True),
 )
 async def delete_scenario(
     scenario_id: Annotated[str, Field(description="The scenario UUID to delete")],
@@ -1696,7 +1696,7 @@ async def delete_scenario(
 @server.tool(
     name="clone_scenario",
     description="Clone an existing Moment scenario (typically a shared template) to create your own editable copy. After cloning, use update_scenario to customize factor specs, then run_scenario to execute it.",
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Clone Scenario", destructiveHint=True),
 )
 async def clone_scenario(
     scenario_id: Annotated[str, Field(description="UUID of the scenario to clone")],
@@ -1726,7 +1726,7 @@ async def clone_scenario(
         "Use simulate_returns for ad-hoc what-if tests without saving a scenario first. "
         "Use simulate_flow_scenario for ad-hoc Flow what-if tests with constraints."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Run Scenario", readOnlyHint=True, openWorldHint=True),
 )
 async def run_scenario(
     scenario_id: Annotated[str, Field(description="UUID of the scenario to run")],
@@ -1800,7 +1800,7 @@ async def run_scenario(
         "Returns: factor exposures (betas), simulation_batch_id, and factor_last_values_raw. "
         "Next step: call simulate_returns with the simulation_batch_id to run what-if stress tests."
     ),
-    annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Analyze Quantitative", destructiveHint=True, openWorldHint=True),
 )
 async def analyze_quantitative(
     conditioning_set_id: Annotated[str, Field(description="UUID of the thematic conditioning set (from list_feature_set_templates or create_feature_set)")],
@@ -1928,7 +1928,7 @@ async def analyze_quantitative(
         "existing results instantly or generate new paths without retraining. No conditioning_set_id needed. "
         "Defaults: horizon=20 (~1 month), n_paths=500. Use horizon=60 for quarterly, 120 for 6-month views."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Generate Synthetic Paths", destructiveHint=True, openWorldHint=True),
 )
 async def generate_synthetic(
     conditioning_set_id: Annotated[str | None, Field(
@@ -2262,7 +2262,7 @@ async def generate_synthetic(
         "Pass portfolio_id through so test_flow_risk can be called directly on results. "
         "Run multiple scenarios and compare via test_flow_risk on each flow_job_id."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Simulate Flow Scenario", readOnlyHint=True, openWorldHint=True),
 )
 async def simulate_flow_scenario(
     model_group_id: Annotated[str, Field(
@@ -2392,7 +2392,7 @@ async def simulate_flow_scenario(
         "TIP: Call this on multiple flow_job_ids (baseline + different scenarios) to build a "
         "side-by-side comparison of risk metrics across scenarios."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Test Flow Risk", readOnlyHint=True, openWorldHint=True),
 )
 async def test_flow_risk(
     portfolio_id: Annotated[str, Field(
@@ -2468,7 +2468,7 @@ async def test_flow_risk(
         "Use this to find previous scenario results without re-running them — "
         "pass any flow_job_id to test_flow_risk for risk metrics."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="List Flow Scenarios", readOnlyHint=True),
 )
 async def list_flow_scenarios(
     model_group_id: Annotated[str, Field(
@@ -2503,7 +2503,7 @@ async def list_flow_scenarios(
         "Requires a trained Flow model (run generate_synthetic first). "
         "This is an async GPU job — the tool will poll until completion."
     ),
-    annotations=ToolAnnotations(openWorldHint=True),
+    annotations=ToolAnnotations(title="Validate Flow Model", readOnlyHint=True, openWorldHint=True),
 )
 async def flow_validate(
     model_group_id: Annotated[str, Field(description="UUID of the model group with a trained Flow model")],
@@ -2565,7 +2565,7 @@ async def flow_validate(
         "Flags significant moves (|z-score| > 2) as content opportunities. "
         "Use this to understand the current market environment and decide what Sablier analyses to run."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    annotations=ToolAnnotations(title="Market Radar", readOnlyHint=True, openWorldHint=True),
 )
 async def market_radar() -> str:
     if err := _require_auth():
@@ -2667,7 +2667,7 @@ async def market_radar() -> str:
         "overage rates, and usage for the current month. Use this to check "
         "what operations are available and what they cost."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Billing Info", readOnlyHint=True),
 )
 async def get_billing_info() -> str:
     if err := _require_auth():
@@ -2687,7 +2687,7 @@ async def get_billing_info() -> str:
         "Shows per-operation counts, included limits, overage counts, and costs. "
         "Month format: YYYY-MM (e.g. '2026-03')."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Get Billing Usage", readOnlyHint=True),
 )
 async def get_billing_usage(
     month: Annotated[str | None, Field(
@@ -2714,7 +2714,7 @@ async def get_billing_usage(
         "To manage an existing subscription (upgrade, downgrade, cancel, update payment), "
         "use manage_subscription instead."
     ),
-    annotations=ToolAnnotations(destructiveHint=True),
+    annotations=ToolAnnotations(title="Subscribe", destructiveHint=True),
 )
 async def subscribe(
     tier: Annotated[str, Field(description="Subscription tier: 'pro' ($79/mo) or 'enterprise' ($399/mo per seat)")],
@@ -2738,7 +2738,7 @@ async def subscribe(
         "upgrade, downgrade, cancel, or update payment method. "
         "Returns a portal URL. For new subscriptions, use subscribe instead."
     ),
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(title="Manage Subscription", readOnlyHint=True),
 )
 async def manage_subscription() -> str:
     if err := _require_auth():
