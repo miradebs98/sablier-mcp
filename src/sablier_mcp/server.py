@@ -759,7 +759,7 @@ async def get_portfolio_value(
 
 @server.tool(
     name="get_portfolio_analytics",
-    description="Get portfolio analytics: Sharpe ratio, volatility, expected return, max drawdown, and beta. Supports timeframes: 1W, 1M, 1Y, 2Y, 5Y.",
+    description="Get historical portfolio analytics: Sharpe ratio, volatility, expected return, max drawdown, and market beta (benchmarked vs SPY). Supports timeframes: 1W, 1M, 1Y, 2Y, 5Y. This is backward-looking — for forward-looking risk, use simulate_returns or test_flow_risk.",
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def get_portfolio_analytics(
@@ -821,9 +821,15 @@ async def delete_portfolio(
 @server.tool(
     name="optimize_portfolio",
     description=(
-        "Find optimal portfolio weights using per-asset simulation data. "
-        "Requires a simulation_batch_id from simulate_betas. "
-        "Objective options: 'max_sharpe', 'min_variance', 'max_return'."
+        "Find optimal portfolio weights using per-asset factor exposures from simulate_betas or analyze_quantitative. "
+        "Requires simulation_batch_id (from their output). "
+        "Objectives: 'max_sharpe' (maximize risk-adjusted return), 'min_variance' (minimize portfolio volatility), "
+        "'max_return' (maximize expected return for given risk). "
+        "Advanced objectives (pass the string directly): 'analytical_risk_parity' (equalize risk contributions), "
+        "'mean_cvar' (minimize CVaR, requires simulation_ids not beta_simulation_ids), "
+        "'expected_utility' (maximize CRRA utility), 'risk_parity' (CVaR-based equal risk), "
+        "'exposure_target' (match target factor exposures — set target_exposures on the API). "
+        "Default: 'max_sharpe'. Long-only constraint applied by default."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
 )
@@ -851,8 +857,10 @@ async def optimize_portfolio(
 @server.tool(
     name="get_efficient_frontier",
     description=(
-        "Calculate the efficient frontier for portfolio assets. "
-        "Returns a curve of optimal risk-return tradeoffs."
+        "Calculate the mean-variance efficient frontier for portfolio assets using historical returns. "
+        "Returns a curve of optimal risk-return tradeoffs with long-only constraints (no shorting). "
+        "Each point includes optimal weights, expected return, and volatility. "
+        "This is a historical analysis — for forward-looking optimization, use optimize_portfolio with simulation data."
     ),
     annotations=ToolAnnotations(readOnlyHint=True),
 )
@@ -1098,7 +1106,7 @@ async def delete_grain_analysis(
 
 @server.tool(
     name="list_model_groups",
-    description="List all existing analyses. Each analysis ties a portfolio to a set of market drivers and contains per-asset models. Use this to find previous work, check if training is done, or retrieve simulation results for risk testing and scenarios.",
+    description="List all model groups (each created by analyze_quantitative or generate_synthetic). A model group ties a portfolio to a conditioning set and contains per-asset models. Check model_type: null/absent = Moment (linear), 'flow_generative' = Flow. Use this to find model_group_ids for simulate_betas, simulate_returns, generate_synthetic (resume), or run_model_validation.",
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def list_model_groups() -> str:
@@ -1310,7 +1318,7 @@ async def get_residual_correlation(
 
 @server.tool(
     name="list_simulations",
-    description="List all MOMENT simulations (betas computations) for a model group. Returns simulation IDs, dates, and status. NOT for Flow models — use generate_synthetic with model_group_id to check Flow results.",
+    description="List past beta computation runs for a Moment model group. Each entry is a simulate_betas invocation with its simulation_batch_id, date, and status. Use this to find older simulation_batch_ids for simulate_returns. NOT for Flow models — use list_flow_scenarios for those.",
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def list_simulations(
@@ -1333,9 +1341,11 @@ async def list_simulations(
 @server.tool(
     name="simulate_betas",
     description=(
-        "Compute how each asset in a trained model group responds to the chosen market drivers. "
-        "Requires model_group_id (status must be 'trained'). "
-        "Returns per-asset factor exposures, simulation_batch_id, and current factor levels (factor_means)."
+        "Re-compute factor exposures (betas) for an already-trained model group. "
+        "Use this when you already have a trained model_group_id (from analyze_quantitative or list_model_groups) "
+        "and want to refresh betas with a different lookback window, or get a new simulation_batch_id. "
+        "You do NOT need this if you just ran analyze_quantitative — it already includes this step. "
+        "Returns per-asset factor exposures, simulation_batch_id (for simulate_returns), and factor_last_values_raw."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
 )
@@ -1456,12 +1466,14 @@ def _format_validation_results(model_group_id: str, result: dict) -> str:
 @server.tool(
     name="simulate_returns",
     description=(
-        "Run a what-if scenario — this is the PRIMARY tool for stress-testing a portfolio. "
+        "Run an ad-hoc what-if stress test on a Moment (linear) model — the PRIMARY tool for quick scenario analysis. "
         "Requires simulation_batch_id from analyze_quantitative or simulate_betas. "
         "Pass ALL conditioning_features as absolute price levels in the factors dict. "
         "Use factor_last_values_raw from the betas output as current baseline, then compute targets "
         "(e.g. to shock SPY -5% from current 633: pass {'US Market': 601.35}). "
-        "Returns per-asset expected returns, VaR, Expected Shortfall, and return distribution."
+        "Returns per-asset expected returns, VaR, Expected Shortfall, and return distribution. "
+        "For saved/reusable scenarios, use create_scenario + run_scenario instead. "
+        "For Flow (generative) models, use simulate_flow_scenario instead."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
 )
@@ -1532,9 +1544,10 @@ async def simulate_returns(
 @server.tool(
     name="create_scenario",
     description=(
-        "Save a named scenario template to the database for later reuse. "
-        "This does NOT run a simulation — use simulate_returns to actually run what-if scenarios. "
-        "Requires model_id (an individual model UUID, NOT model_group_id). "
+        "Save a named Moment scenario template for later reuse with run_scenario. "
+        "This does NOT run a simulation — use run_scenario to execute it, or simulate_returns for ad-hoc tests. "
+        "IMPORTANT: requires model_id — this is an individual per-asset model UUID from list_model_groups → models[].model_id, "
+        "NOT the model_group_id. Each scenario is tied to one asset's model. "
         "Factor spec format: {'VIX': {'type': 'fixed', 'value': 35}}. "
         "Supported types: 'fixed' (exact value), 'percentile' (historical percentile), 'shock' (std dev shift)."
     ),
@@ -1571,9 +1584,10 @@ async def create_scenario(
 @server.tool(
     name="list_scenarios",
     description=(
-        "List saved MOMENT scenario templates. These are stored factor specs — "
-        "to actually run a scenario, use simulate_returns with the factor values. "
-        "NOT for Flow scenarios — use simulate_flow_scenario instead."
+        "List saved Moment scenario templates (created via create_scenario or clone_scenario). "
+        "These are stored factor specs tied to individual model_ids — "
+        "to execute one, use run_scenario. For ad-hoc tests, use simulate_returns directly. "
+        "NOT for Flow scenarios — use list_flow_scenarios for those."
     ),
     annotations=ToolAnnotations(readOnlyHint=True),
 )
@@ -1681,7 +1695,7 @@ async def delete_scenario(
 
 @server.tool(
     name="clone_scenario",
-    description="Clone an existing scenario (typically a template) to create your own editable copy.",
+    description="Clone an existing Moment scenario (typically a shared template) to create your own editable copy. After cloning, use update_scenario to customize factor specs, then run_scenario to execute it.",
     annotations=ToolAnnotations(destructiveHint=True),
 )
 async def clone_scenario(
@@ -1706,10 +1720,11 @@ async def clone_scenario(
 @server.tool(
     name="run_scenario",
     description=(
-        "Run a saved scenario through its pipeline. For Moment scenarios (with factor_values): "
-        "synchronously computes factor exposures and simulates returns under the stressed factors. "
-        "For Flow scenarios (with or without constraints): queues an async GPU job. "
-        "Returns completed results for Moment, or a job_id to poll for Flow."
+        "Run a previously saved scenario template (from create_scenario or clone_scenario). "
+        "For Moment scenarios: synchronously computes betas + simulates returns under the saved factor specs. "
+        "For Flow scenarios: queues an async GPU job. "
+        "Use simulate_returns for ad-hoc what-if tests without saving a scenario first. "
+        "Use simulate_flow_scenario for ad-hoc Flow what-if tests with constraints."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
 )
@@ -1776,11 +1791,14 @@ async def run_scenario(
 @server.tool(
     name="analyze_quantitative",
     description=(
-        "One-shot quantitative analysis: builds factor models, trains, and computes asset sensitivities to "
-        "market drivers. Uses a two-layer conditioning architecture: a thematic layer (conditioning_set_id, required) "
-        "and an optional baseline layer (baseline_set_id) that absorbs common market variance before thematic factors. "
+        "Build and train linear factor models for a portfolio in one step (creates models → trains → computes betas). "
+        "This is the starting point for Moment (linear) analysis. "
+        "Requires conditioning_set_id (the market drivers — get one from list_feature_set_templates or create_feature_set). "
+        "Uses a two-layer architecture: thematic factors (conditioning_set_id) + optional baseline factors "
+        "(use_baseline=True absorbs market/value/growth variance before thematic factors). "
         "Pass either portfolio_id or tickers directly (auto-creates portfolio with equal weights). "
-        "Returns factor exposures, simulation_batch_id for use with simulate_returns."
+        "Returns: factor exposures (betas), simulation_batch_id, and factor_last_values_raw. "
+        "Next step: call simulate_returns with the simulation_batch_id to run what-if stress tests."
     ),
     annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True),
 )
@@ -1900,13 +1918,14 @@ async def analyze_quantitative(
 @server.tool(
     name="generate_synthetic",
     description=(
-        "Train a generative Flow model and produce simulated multi-step trajectories for portfolio assets "
-        "and market drivers. Returns per-asset path distributions, feature_names (needed for constraints), "
-        "and IDs for follow-up tools (simulate_flow_scenario, test_flow_risk). "
-        "NEW RUN: requires conditioning_set_id (from list_feature_set_templates) + tickers or portfolio_id. "
-        "Training ~5-15 min, path generation ~1-3 min. "
-        "RESUME: pass model_group_id (from list_model_groups, model_type='flow_generative') to retrieve "
-        "existing results instantly or generate new paths without retraining. conditioning_set_id not needed. "
+        "Train a generative Flow model and produce simulated multi-step price trajectories. "
+        "This is the starting point for Flow analysis (the generative alternative to Moment/linear). "
+        "Returns per-asset path distributions, feature_names (needed for simulate_flow_scenario constraints), "
+        "and IDs for follow-up tools (simulate_flow_scenario, test_flow_risk, flow_validate). "
+        "TWO MODES: "
+        "(1) NEW RUN: pass conditioning_set_id + tickers/portfolio_id. Trains on GPU (~5-15 min) then generates paths (~1-3 min). "
+        "(2) RESUME: pass model_group_id (from list_model_groups where model_type='flow_generative') to retrieve "
+        "existing results instantly or generate new paths without retraining. No conditioning_set_id needed. "
         "Defaults: horizon=20 (~1 month), n_paths=500. Use horizon=60 for quarterly, 120 for 6-month views."
     ),
     annotations=ToolAnnotations(openWorldHint=True),
@@ -2689,10 +2708,10 @@ async def get_billing_usage(
 @server.tool(
     name="subscribe",
     description=(
-        "Subscribe to a Sablier plan or upgrade your current subscription. "
-        "Returns a Stripe Checkout URL to complete payment. "
+        "Subscribe to a Sablier plan (new subscription). Returns a Stripe Checkout URL to complete payment. "
         "Tiers: 'starter' (Pro, $59/mo), 'pro' (Pro+, $199/mo), 'enterprise' ($499/mo per seat). "
-        "If already subscribed, returns a portal URL to manage/change your subscription."
+        "To manage an existing subscription (upgrade, downgrade, cancel, update payment), "
+        "use manage_subscription instead."
     ),
     annotations=ToolAnnotations(destructiveHint=True),
 )
@@ -2714,9 +2733,9 @@ async def subscribe(
 @server.tool(
     name="manage_subscription",
     description=(
-        "Open the Stripe Customer Portal to manage your subscription: "
+        "Open the Stripe Customer Portal to manage an EXISTING subscription: "
         "upgrade, downgrade, cancel, or update payment method. "
-        "Returns a portal URL."
+        "Returns a portal URL. For new subscriptions, use subscribe instead."
     ),
     annotations=ToolAnnotations(readOnlyHint=True),
 )
